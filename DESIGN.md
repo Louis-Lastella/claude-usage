@@ -32,5 +32,8 @@ limit number 80/600 (-0.04em) · KPI 26/600. Labels are sentence case, never upp
 - Savings tips are one list card, not a card grid. KPIs are one strip with hairline dividers.
 - On/off settings are switches (`.set input[type=checkbox]`).
 - Phone (<= 860 px): the sidebar becomes a bottom tab bar with labels; every control is >= 40-44 px tall.
-- Motion: one moment, meters fill on load (0.8 s ease-out); everything else is 150-200 ms state feedback.
+- Motion: only 150-200 ms state feedback (switches, folds); nothing animates on load and zoom is locked on phones.
   `prefers-reduced-motion` turns it all off.
+- Haptics: a tapped control (tab, chip, button, fold, switch) gives a short vibration, `static/haptics.js`. iOS has no
+  Vibration API, so a transparent label tied to a hidden `<input type=checkbox switch>` covers each control; Android
+  uses `navigator.vibrate`.
