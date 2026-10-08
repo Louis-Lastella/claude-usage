@@ -130,7 +130,12 @@ def tok(s):
     return len(s or "") / CPT
 
 
+def known_model(model):
+    return any(model.startswith(k) for k in PRICES)
+
+
 def price(model):
+    # ponytail: unknown Claude models fall back to Opus 5.5 prices, the UI marks them as estimated
     key = max((k for k in PRICES if model.startswith(k)), key=len, default="claude-opus-5-5")
     return [p / 1e6 for p in PRICES[key]]
 
@@ -1099,7 +1104,7 @@ def page_overview(p):
     where = sorted(d["where"].items(), key=lambda x: -x[1])
     models = sorted(d["models"].items(), key=lambda x: -x[1][2])
     models_html = '<ol class="rank">' + "".join(
-        f'<li><span class="n">{i}</span><span class="m">{brk(m)}</span><span class="v">{money(x[2])}</span><b>{pct(x[2], tot)}</b></li>'
+        f'<li><span class="n">{i}</span><span class="m">{brk(m)}{"" if known_model(m) else " <small>" + tr("ov.estimated") + "</small>"}</span><span class="v">{money(x[2])}</span><b>{pct(x[2], tot)}</b></li>'
         for i, (m, x) in enumerate(models, 1)) + "</ol>"
     logged = tr("ov.logged", p=pc(d["logged"] / (d["n_steps"] or 1) * 100))
     body = f"""{limits_card(w["total"] if w["week"] else None)}
@@ -1453,6 +1458,7 @@ def selftest():
     assert [l for l, _ in s] == ["misc", "plugin:ponytail", "plugin:superpowers", "notes"], s
     assert segments("me\n# memory-tencentdb\nx", pm)[-1][0] == "plugin:memory_tencentdb"   # - and _ are equivalent
     assert price("claude-opus-5-5")[0] == 4e-6 and price("claude-opus-4-8")[4] == 25e-6 and price("claude-opus-4-1-x")[0] == 15e-6
+    assert known_model("claude-opus-5-5") and not known_model("claude-opus-9")
     # Replay and cache
     db, msgs = test_db()
     calls, _ = simulate(msgs, {"schema": 100.0})

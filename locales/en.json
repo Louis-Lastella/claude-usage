@@ -153,6 +153,7 @@
   "ov.logged": "For {p} of the steps Hermes' log had real cache numbers per step. For the rest the cache is recalculated with the pause rule.",
   "ov.where": "Where it happens",
   "ov.models": "Models",
+  "ov.estimated": "(estimated price)",
   "ov.save": "What you can save",
   "ov.save.hint": "Calculated from your real data. Percentages refer to the selected period.",
   "ov.nothing": "Nothing stands out right now.",

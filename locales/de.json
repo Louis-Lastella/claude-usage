@@ -153,6 +153,7 @@
   "ov.logged": "Für {p} der Schritte lagen echte Cache-Werte pro Schritt aus Hermes' Log vor, für den Rest ist der Cache nach der Pausen-Regel nachgerechnet.",
   "ov.where": "Wo es anfällt",
   "ov.models": "Modelle",
+  "ov.estimated": "(Preis geschätzt)",
   "ov.save": "Was du sparen kannst",
   "ov.save.hint": "Aus deinen echten Daten berechnet, die Prozente beziehen sich auf den gewählten Zeitraum.",
   "ov.nothing": "Gerade nichts Auffälliges.",
