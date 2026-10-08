@@ -1453,6 +1453,7 @@ def window_sum(d, since):
 
 
 def span_sum(d, a, b):
+    a = round(a / 3600) * 3600   # limit resets land a few ms off the full hour; the hour buckets start on it
     return sum(sum(v.values()) for h, v in d["hours"].items() if a <= h < b)
 
 
@@ -1634,7 +1635,7 @@ def overlay(w, d30):
     now, wk = time.time(), 7 * 86400
     hrs, lines, top = sorted(d30["hours"].items()), [], 0.0
     for k in range(4):
-        s, acc, pts = w["since"] - k * wk, 0.0, [(0.0, 0.0)]
+        s, acc, pts = round(w["since"] / 3600) * 3600 - k * wk, 0.0, [(0.0, 0.0)]
         for h, comp in hrs:
             if s <= h < min(s + wk, now):
                 acc += sum(comp.values())
@@ -2078,6 +2079,7 @@ def selftest():
     t0 = 1_800_000_000.0
     d30 = {"hours": {t0 - 8 * 86400: {"x": 10.0}, t0 - 3600: {"x": 12.0}}}
     assert week_delta(d30, 12.0, t0 - 86400, t0) == "+20% vs. last week" and week_delta(d30, 12.0, t0 - 20 * 86400, t0) == ""
+    assert span_sum({"hours": {3600: {"x": 1.0}}}, 3600.4, 7200) == span_sum({"hours": {3600: {"x": 1.0}}}, 3599.6, 7200) == 1.0  # resets a few ms off
     # Config, markers, prices
     cfg = ("model:\n  default: m\n  provider: anthropic\nmemory:\n\n  provider: memory_tencentdb\n"
            "plugins:\n  enabled:\n    - ponytail\n    - 'superpowers'\n    - platforms/ntfy\n  disabled: []\n")
