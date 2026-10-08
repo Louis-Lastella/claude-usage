@@ -99,7 +99,8 @@ _SRV, _TOPIC = _env_ntfy()
 DEFAULTS = {
     "theme": "system", "lang": DEFAULT_LANG, "currency": "USD", "numbers": "compact", "period": DEFAULT_P, "limit_view": "used",
     "cost_unit": "money",
-    "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True,
+    "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True, "alert_free": True, "alert_steps": True,
+    "alert_digest": True,
     "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
     "push": "own" if _TOPIC else "off", "ntfy_server": _SRV, "ntfy_topic": _TOPIC, "ntfy_token": "", "url": PUBLIC_URL,
 }
@@ -920,9 +921,18 @@ def alerts(L, hist, sent, now, s=None):
         name = tr("win." + key)
         if u >= 100:
             full.append(name)
-        if not reset or u >= 100 or f"{key}:{reset:.0f}" in sent:
+            if length <= 5 * 3600 and reset:
+                sent["full:" + key] = reset   # remembered for "free again"
+        if not reset or u >= 100:
             continue
+        if key == "seven_day" and s["alert_steps"]:
+            step = next((x for x in (90, 80) if u >= x), None)   # only the highest step reached, once per week
+            if step and not any(f"{key}@{x}:{reset:.0f}" in sent for x in (80, 90) if x >= step):
+                out.append((f"{key}@{step}:{reset:.0f}", tr("alert.step", name=name, u=pc(u)),
+                            tr("alert.step.text", reset=when(reset, "daytime"), pct=pc((100 - u) / max((reset - now) / 86400, 1)))))
         tag = f"{key}:{reset:.0f}"
+        if tag in sent:
+            continue
         if length <= 5 * 3600:
             r = rate(hist, key, u, reset - length, now)
             fa = now + (100 - u) / r if r else None
@@ -935,6 +945,10 @@ def alerts(L, hist, sent, now, s=None):
                 out.append((tag, tr("alert.week", name=name),
                             tr("alert.week.text", u=pc(u), frac=pc(frac * 100), full=when(start + (now - start) * 100 / u, "daytime"),
                                reset=when(reset, "daytime"))))
+    for k in [k for k in sent if k.startswith("full:")]:
+        tag = f"free:{k[5:]}:{sent[k]:.0f}"
+        if s["alert_free"] and 0 <= now - sent[k] < 3600 and tag not in sent:   # within the hour after the reset
+            out.append((tag, tr("alert.free", name=tr("win." + k[5:])), tr("alert.free.text", reset=hm(sent[k]))))
     x = (L or {}).get("extra_usage") or {}
     used = x.get("used_credits")
     if x.get("is_enabled") and used is not None:
@@ -999,6 +1013,25 @@ def notify(title, text, prio=4):
     return ok
 
 
+def digest(now, sent, L, get=None, s=None):
+    """Sunday-evening summary of the limit week, once per ISO week: (tag, title, text) or None. The comparison is
+    against the same stretch of time one week earlier."""
+    s, get = s or SET, get or data_for
+    dt = datetime.fromtimestamp(now)
+    tag = "digest:" + dt.strftime("%G-%V")
+    if not s["alert_digest"] or dt.weekday() != 6 or dt.hour < 18 or tag in sent:
+        return None
+    w, d30 = get("w"), get("30")
+    prev = sum(sum(v.values()) for h, v in d30["hours"].items() if w["since"] - 7 * 86400 <= h < now - 7 * 86400)
+    delta = tr("alert.digest.delta", d=("+" if w["total"] >= prev else "−") + pc(abs(w["total"] / prev - 1) * 100)) if prev else ""
+    top, wk = ranked(w["comp"]), next((x for x in windows(L, now) if x[0] == "seven_day"), None)
+    return tag, tr("alert.digest"), tr("alert.digest.text", u=pc(wk[1]) if wk else "–", reset=when(wk[3], "daytime") if wk and wk[3] else "–",
+                                       cost=cash(w["total"]), delta=delta, top=label(top[0][0], w["ttl"])[0] if top else "–")
+
+
+PRIO = {"free": 3, "seven_day@80": 3, "digest": 2}   # ntfy priority by alert kind, everything else 4 (high)
+
+
 def check_alerts():
     f = DATA / "alerts.json"
     try:
@@ -1008,8 +1041,9 @@ def check_alerts():
     if not STATE["limits"] or quiet_now(time.time()):  # in quiet hours due alerts wait, nothing is marked as sent
         return
     msgs, new = alerts(STATE["limits"], limit_history(), sent, time.time())
+    msgs += [x for x in [digest(time.time(), sent, STATE["limits"])] if x]
     for tag, title, text in msgs:
-        if notify(title, text):
+        if notify(title, text, PRIO.get(tag.split(":")[0], 4)):
             new[tag] = time.time()
     if new != sent:
         DATA.mkdir(parents=True, exist_ok=True)
@@ -1717,7 +1751,10 @@ def page_settings(q):
     quiet = (f'{check("quiet")}<input type="time" id="quiet_from" name="quiet_from" value="{s["quiet_from"]}" aria-label="{T("quiet.from")}">'
              f'<span class="why">–</span><input type="time" id="quiet_to" name="quiet_to" value="{s["quiet_to"]}" aria-label="{T("quiet.to")}">')
     alerts_ = (field("alert_five", T("a.five"), five, T("a.five.why")) + field("alert_week", T("a.week"), check("alert_week"), T("a.week.why"))
-               + field("alert_extra", T("a.extra"), check("alert_extra"), T("a.extra.why")) + field("quiet", T("quiet"), quiet, T("quiet.why")))
+               + field("alert_extra", T("a.extra"), check("alert_extra"), T("a.extra.why"))
+               + field("alert_free", T("a.free"), check("alert_free"), T("a.free.why"))
+               + field("alert_steps", T("a.steps"), check("alert_steps"), T("a.steps.why"))
+               + field("alert_digest", T("a.digest"), check("alert_digest"), T("a.digest.why")) + field("quiet", T("quiet"), quiet, T("quiet.why")))
     host, own = urlparse(s["ntfy_server"]).netloc, s["ntfy_server"] != "https://ntfy.sh"
     target = ntfy_target()
     state = (T("push.state.off") if not target else T("push.state.hermes") if s["push"] == "hermes"
@@ -1966,6 +2003,23 @@ def selftest():
     assert [t.split(":")[0] for t, _, _ in msgs] == ["extra"] and st["extra_used"] == 100  # state only after sending
     assert alerts(L, hist, {**st, msgs[0][0]: now}, now + 120) == ([], {**st, msgs[0][0]: now, "extra_used": 150})
     kinds = lambda s: [t.split(":")[0] for t, _, _ in alerts(L, hist, {}, now, {**SET, **s})[0]]
+    # Free again within the hour after a full 5-hour window; weekly steps: only the highest one, each once
+    L2 = {"five_hour": {"utilization": 100, "resets_at": iso(now + 600)}, "seven_day": {"utilization": 85, "resets_at": iso(now + 43200)}}
+    m, st = alerts(L2, [], {}, now)
+    assert [t.split(":")[0] for t, _, _ in m] == ["seven_day@80"] and st["full:five_hour"] == now + 600, (m, st)
+    L2.update(five_hour={"utilization": 0, "resets_at": None}, seven_day={"utilization": 91, "resets_at": iso(now + 43200)})
+    sent2 = {**st, m[0][0]: now}
+    m2, st2 = alerts(L2, [], sent2, now + 700)
+    assert sorted(t.split(":")[0] for t, _, _ in m2) == ["free", "seven_day@90"], m2
+    assert alerts(L2, [], {**st2, **{t: now for t, _, _ in m2}}, now + 800)[0] == [] and alerts(L2, [], sent2, now + 4300)[0][0][0].startswith("seven_day@90")
+    assert alerts(L2, [], sent2, now + 700, {**SET, "alert_free": False, "alert_steps": False})[0] == []
+    sun = datetime(2026, 10, 11, 19, 0).timestamp()   # a Sunday evening
+    fake = {"w": {"since": sun - 6 * 86400, "total": 10.0, "comp": {"think": 6.0, "tool:terminal": 4.0}, "ttl": 300},
+            "30": {"hours": {sun - 10 * 86400: {"think": 8.0}, sun - 5 * 86400: {"think": 10.0}}}}
+    dg = digest(sun, {}, {"seven_day": {"utilization": 70, "resets_at": iso(sun + 86400)}}, fake.get)
+    assert dg[0] == "digest:2026-41" and "+25%" in dg[2] and "$10.00" in dg[2] and "70%" in dg[2], dg
+    assert digest(sun, {dg[0]: sun}, {}, fake.get) is None and digest(sun - 3600 * 2, {}, {}, fake.get) is None
+    assert digest(sun, {}, {}, fake.get, {**SET, "alert_digest": False}) is None
     assert kinds({"alert_five": False}) == kinds({"five_min": 20}) == ["seven_day"] and kinds({"alert_week": False}) == ["five_hour"]
     # Settings: a missing checkbox is off, invalid input keeps the old value, the token stays unless removed
     s = clean({"theme": "dark", "currency": "XXX", "five_min": "3", "ntfy_topic": "bad topic", "quiet_from": "25:00",
