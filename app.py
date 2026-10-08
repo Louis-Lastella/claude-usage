@@ -512,7 +512,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
     hsteps, hsess = defaultdict(int), defaultdict(set)    # hour start -> steps, sessions
     models = defaultdict(lambda: [0.0, 0.0, 0.0])        # calls, tokens, $
     uses, sizes_acc = defaultdict(int), defaultdict(lambda: [0, 0.0])
-    sess, steps, breaks = {}, [], defaultdict(lambda: [0, 0.0])   # breaks: cause -> [count, $]
+    sess, steps, breaks, heavy = {}, [], defaultdict(lambda: [0, 0.0]), []   # breaks: cause -> [count, $]
     tot = dict(calls=0.0, tokens=0.0, long=0.0, writes=0.0, avoid=0.0, extra=0.0, n_steps=0, logged=0)
     repos, prx = home_repos(), project_rx()
 
@@ -578,6 +578,13 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
             fr, fw = (cr / SR, (cw + ci) / SW) if SR and SW else (0.0, (cr + cw + ci) / (SR + SW or 1))
             fo = co / SO if SO else 0.0
             p_cost, apos = 0.0, [i for i, m in enumerate(msgs[s]) if m[0] == "assistant"]
+            # ponytail: a result is written once and read on every later step; rebuilds and compression are ignored
+            ts = [x[0] for x in calls]
+            for m in msgs[s]:
+                if m[0] == "tool" and since < m[6] <= until:
+                    n = tok(m[1]) + IMAGE_TOK * sum((m[1] or "").count(x) for x in IMG)
+                    later = len(ts) - bisect.bisect_right(ts, m[6])
+                    heavy.append((n * (fw + fr * later), s, m[3] or "?", n * kt, later, m[6]))
             for j, ((t, gap, before, now, out, keys), (hit, new, lost, kind, logged)) in enumerate(zip(calls, splits)):
                 if t <= since or t > until:
                     continue
@@ -639,7 +646,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
     else:
         ttl_save, ttl_alt = tot["writes"] * 0.375 - tot["extra"] * 0.625, 300
     return dict(comp=comp, where=where, models=models, hours=hours, hsteps=hsteps, hsess=hsess, sess=sess, steps=steps,
-                uses=uses, sizes=sizes_acc, breaks=dict(breaks), total=sum(comp.values()), ttl=ttl, ttl_alt=ttl_alt, ttl_save=ttl_save,
+                uses=uses, sizes=sizes_acc, breaks=dict(breaks), heavy=sorted(heavy, reverse=True)[:10], total=sum(comp.values()), ttl=ttl, ttl_alt=ttl_alt, ttl_save=ttl_save,
                 since=since, until=until, hourly=hourly, **tot)
 
 
@@ -1791,6 +1798,9 @@ def page_details(p):
                          cnt(skill_uses if k == "tool:skill_view" else uses.get(k, 0)),
                          "–" if k == "tool:skill_view" else avg(k), money(v), pct(v, tot))
     how = tr("det.how.text", ttl=ttl_text(d["ttl"]), p=pc(d["logged"] / (d["n_steps"] or 1) * 100))
+    hv = [(f'{brk(tool)}<span class="why">{when(t, "short")}</span>',
+           f'<a href="/s/{quote(sid)}?p={quote(p)}">{e((d["sess"].get(sid, {}).get("title") or tr("untitled"))[:70])}</a>',
+           num(n), tr("det.heavy.steps", n=cnt(later)), money(c)) for c, sid, tool, n, later, t in d["heavy"]]
     brs = sorted(d["breaks"].items(), key=lambda x: -x[1][1])
     breaks = (f'<section class="sec"><h2>{tr("det.breaks")}</h2><p class="hint">{tr("det.breaks.hint")}</p>'
               + table(["th.cause", "th.breaks", "th.cost", "th.share"],
@@ -1799,6 +1809,9 @@ def page_details(p):
     body = f"""<section><h2>{tr("det.tools")}</h2>
 <p class="hint">{tr("det.tools.hint")}</p>
 {table(["th.tool", "th.calls", "th.avg_return", "th.cost", "th.share"], [trow(k, v) for k, v in tools], ("", "", "", "", "o"))}</section>
+<section class="sec"><h2>{tr("det.heavy")}</h2>
+<p class="hint">{tr("det.heavy.hint")}</p>
+{table(["th.result", "th.session", "th.size", "th.carried", "th.cost"], hv, ("", "l o", "", "o", ""))}</section>
 <section class="sec"><h2>{tr("det.skills")}</h2>
 {table(["th.skill", "th.loaded", "th.avg_size", "th.cost", "th.share"], [(brk(k[6:]), cnt(uses.get(k, 0)), avg(k), money(v), pct(v, tot)) for k, v in skills], ("", "", "", "", "o"))}</section>
 <section class="sec"><h2>{tr("det.plugins")}</h2>
@@ -2228,6 +2241,7 @@ def selftest():
     assert (break_cause(rows, ap, 3, rl, 50), break_cause(rows, ap, 3, rl, 10), break_cause(rows, ap, 3, rl[:3] + [None], 10)) == ("deep", "other", "sim")
     assert abs(sum(sum(v.values()) for v in d["hours"].values()) - d["total"]) < 1e-12        # the history adds up
     assert sum(d["hsteps"].values()) == d["n_steps"] == 3
+    assert [x[1:3] + (x[4],) for x in d["heavy"]] == [("s", "terminal", 1)] and d["heavy"][0][0] > 0   # written by the next call, read by 1 later
     # Projects: majority of paths, Hermes' own folder only without another project, system folders don't count
     rx, repos = project_rx("/h/u", "/h/u/.hermes"), {"code/app": "app", "tool": "tool"}
     assert project_of(['{"command": "cat ~/.hermes/x; cd /opt/shop && ls /opt/shop/src"}'], repos, rx) == "shop"
