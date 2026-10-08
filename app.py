@@ -954,6 +954,25 @@ def meter(u, frac=None, hot=False):
     return f'<div class="meter{" hot" if hot else ""}"><i style="width:{min(max(u, 0), 100):.1f}%"></i>{mark}</div>'
 
 
+def api_summary():
+    """Compact JSON for widgets: limits with reset times, the week forecast and this limit week's cost."""
+    refresh_limits(120)
+    L, now = STATE["limits"] or {}, time.time()
+    out = {"at": round(STATE["ok"]) or None, "limits": {}}
+    for key, u, frac, reset, length in windows(L, now):
+        out["limits"][key] = {"used": u, "resets_at": round(reset) if reset else None,
+                              "elapsed": round(frac, 3) if frac is not None else None}
+    w = out["limits"].get("seven_day")
+    if w and w["elapsed"] is not None:
+        w["forecast"] = week_forecast(w["used"], w["elapsed"])
+    x = L.get("extra_usage") or {}
+    if x.get("is_enabled"):
+        out["extra"] = {k: x.get(k) for k in ("used_credits", "monthly_limit", "currency", "decimal_places")}
+    d = data_for("w")
+    out["week_cost_usd"] = round(d["total"], 2) if d["week"] else None
+    return json.dumps(out)
+
+
 def limits_card(week_cost):
     refresh_limits(120)
     L, now = STATE["limits"], time.time()
@@ -1431,6 +1450,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = page_sessions(p, q)
             elif path.startswith("/s/"):
                 body = page_session(unquote(path[3:]), p)
+            elif path == "/api/summary":
+                return self.send(api_summary().encode(), "application/json")
             elif path == "/health":
                 body = "ok"
             else:
