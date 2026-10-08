@@ -460,6 +460,29 @@ def floor(t, hourly):
     return datetime.fromtimestamp(t).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
+IMG = ("[screenshot]", "[Image attached")   # how Hermes stores images in the history
+BREAKS = ("shrunk", "image", "turn", "deep", "other", "sim")
+
+
+def break_cause(rows, apos, j, real, prefix):
+    """Why the cache broke right before assistant row j although there was no pause. shrunk: the prompt got smaller,
+    older history was removed or rewritten. image: a new image while more than 3 are in the history (Hermes drops old
+    ones from the request). turn: a new message came in (the gateway reloads the conversation, images saved as text
+    change). deep: only the system prompt was read from cache, the change sat more than ~20 blocks back. other: none
+    of these. sim: no log values for this step, the replay only saw the start of the prompt change."""
+    if not real[j]:
+        return "sim"
+    new = rows[apos[j - 1] + 1:apos[j]] if j else rows[:apos[0]]
+    if j and real[j - 1] and real[j][0] < real[j - 1][0]:
+        return "shrunk"
+    imgs = lambda rs: sum((m[1] or "").count(x) for m in rs for x in IMG)
+    if imgs(new) and imgs(rows[:apos[j]]) > 3:
+        return "image"
+    if any(m[0] == "user" for m in new):
+        return "turn"
+    return "deep" if real[j][1] <= prefix * 1.1 else "other"
+
+
 def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
     """Splits the real costs since `since` (or of one session) over components, origin and time.
     Invariant: sum(comp) == real cost of the calls in the period. Contains only ids, no display text."""
@@ -489,7 +512,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
     hsteps, hsess = defaultdict(int), defaultdict(set)    # hour start -> steps, sessions
     models = defaultdict(lambda: [0.0, 0.0, 0.0])        # calls, tokens, $
     uses, sizes_acc = defaultdict(int), defaultdict(lambda: [0, 0.0])
-    sess, steps = {}, []
+    sess, steps, breaks = {}, [], defaultdict(lambda: [0, 0.0])   # breaks: cause -> [count, $]
     tot = dict(calls=0.0, tokens=0.0, long=0.0, writes=0.0, avoid=0.0, extra=0.0, n_steps=0, logged=0)
     repos, prx = home_repos(), project_rx()
 
@@ -554,8 +577,8 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
             SO = sum(sum(x[4].values()) for x in calls)
             fr, fw = (cr / SR, (cw + ci) / SW) if SR and SW else (0.0, (cr + cw + ci) / (SR + SW or 1))
             fo = co / SO if SO else 0.0
-            p_cost = 0.0
-            for (t, gap, before, now, out, keys), (hit, new, lost, kind, logged) in zip(calls, splits):
+            p_cost, apos = 0.0, [i for i, m in enumerate(msgs[s]) if m[0] == "assistant"]
+            for j, ((t, gap, before, now, out, keys), (hit, new, lost, kind, logged)) in enumerate(zip(calls, splits)):
                 if t <= since or t > until:
                     continue
                 parts = defaultdict(float)
@@ -586,8 +609,13 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
                     tot["extra"] += sum(before.values()) * fw
                 for k in keys:
                     uses[k] += 1
+                why = ""
+                if kind == "break" and lost > 1e-9:
+                    why = break_cause(msgs[s], apos, j, real, sum(v for k, v in now.items() if is_prefix(k)) * kt)
+                    breaks[why][0] += 1
+                    breaks[why][1] += lost * fw
                 if sid:
-                    steps.append((t, ctx_tok, cost, lost * fw, kind if lost > 1e-9 else "", keys))
+                    steps.append((t, ctx_tok, cost, lost * fw, (kind + ":" + why if why else kind) if lost > 1e-9 else "", keys))
             for t, k, n in sizes:
                 if since < t <= until:
                     sizes_acc[k][0] += 1; sizes_acc[k][1] += n
@@ -611,7 +639,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
     else:
         ttl_save, ttl_alt = tot["writes"] * 0.375 - tot["extra"] * 0.625, 300
     return dict(comp=comp, where=where, models=models, hours=hours, hsteps=hsteps, hsess=hsess, sess=sess, steps=steps,
-                uses=uses, sizes=sizes_acc, total=sum(comp.values()), ttl=ttl, ttl_alt=ttl_alt, ttl_save=ttl_save,
+                uses=uses, sizes=sizes_acc, breaks=dict(breaks), total=sum(comp.values()), ttl=ttl, ttl_alt=ttl_alt, ttl_save=ttl_save,
                 since=since, until=until, hourly=hourly, **tot)
 
 
@@ -1763,6 +1791,11 @@ def page_details(p):
                          cnt(skill_uses if k == "tool:skill_view" else uses.get(k, 0)),
                          "–" if k == "tool:skill_view" else avg(k), money(v), pct(v, tot))
     how = tr("det.how.text", ttl=ttl_text(d["ttl"]), p=pc(d["logged"] / (d["n_steps"] or 1) * 100))
+    brs = sorted(d["breaks"].items(), key=lambda x: -x[1][1])
+    breaks = (f'<section class="sec"><h2>{tr("det.breaks")}</h2><p class="hint">{tr("det.breaks.hint")}</p>'
+              + table(["th.cause", "th.breaks", "th.cost", "th.share"],
+                      [(f'{tr("brk." + k)}<span class="why">{tr("brk." + k + ".why")}</span>', cnt(n), money(v), pct(v, tot)) for k, (n, v) in brs],
+                      ("l", "", "", "o")) + "</section>") if brs else ""
     body = f"""<section><h2>{tr("det.tools")}</h2>
 <p class="hint">{tr("det.tools.hint")}</p>
 {table(["th.tool", "th.calls", "th.avg_return", "th.cost", "th.share"], [trow(k, v) for k, v in tools], ("", "", "", "", "o"))}</section>
@@ -1780,7 +1813,7 @@ def page_details(p):
        [(brk(n), num(t), cnt(uses.get("tool:" + n, 0) if n != "skill_view" else skill_uses), money(comp.get("schema", 0) * t / st), pct(comp.get("schema", 0) * t / st, tot)) for n, t in schemas], ("", "", "", "", "o"))}</section>
 <section class="sec"><h2>{tr("det.tasks")}</h2>
 {table(["th.item", "th.cost", "th.share"], [(e(label(k, d["ttl"])[0]), money(v), pct(v, tot)) for k, v in tasks])}</section>
-<section class="sec"><h2>{tr("det.how")}</h2>
+{breaks}<section class="sec"><h2>{tr("det.how")}</h2>
 <p class="hint">{how}</p></section>"""
     return layout(tr("nav.details") + " · Usagecast", "/details", p, tr("nav.details"), tr("sub.details", period=period_text(d)), body)
 
@@ -1874,7 +1907,8 @@ def page_session(sid, p):
     names = lambda keys: ", ".join(f"{short(k)}{f' ×{keys.count(k)}' if keys.count(k) > 1 else ''}" for k in dict.fromkeys(keys))
     one_day = len({datetime.fromtimestamp(s[0]).date() for s in d["steps"]}) == 1
     steps = [(hm(t) if one_day else when(t, "short"), num(ctx), money(cost),
-              f'{money(r)} <span class="why">{tr("ses.after_pause" if kind == "rebuild" else "ses.no_pause")}</span>' if kind else "",
+              f'{money(r)} <span class="why">{tr("ses.after_pause") if kind == "rebuild" else tr("ses.no_pause") + " · " + tr("brk." + kind[6:])}</span>'
+              if kind else "",
               f'<span class="why">{brk(names(keys))}</span>') for t, ctx, cost, r, kind, keys in d["steps"]]
     sub = " · ".join([f'<a href="{link("/sessions", p=p)}">{tr("ses.back")}</a>', e(origin_label(x["origin"])),
                       tr("ses.project", name=e(proj_label(x["project"] or NO_PROJ))),
@@ -2115,6 +2149,7 @@ def selftest():
     used |= {f"comp.{k}" for k in FIXED} | {f"comp.{k}.why" for k in FIXED} | {f"tip.tool.{k}" for k in TOOL_HINTS}
     used |= {f"period.{k}" for k in PERIODS} | {f"win.{k}" for k, _ in WINDOWS} | {f"since.{k}" for k in ("w", "1", "7", "30")}
     used |= {f"seg.{k}" for k, _ in HERMES_MARKERS} | {"seg.soul", "seg.misc", "seg.notes", "tip.ttl1h.text", "tip.ttl5m.text"}
+    used |= {f"brk.{k}" for k in BREAKS} | {f"brk.{k}.why" for k in BREAKS}
     used |= {"hist.per.hour", "hist.per.day", "ses.after_pause", "ses.no_pause", "foot.ntfy.on", "foot.ntfy.off", "tip.ttl1h", "tip.ttl5m"}
     for code, texts in LOC.items():
         assert set(texts) == set(LOC["en"]), (code, set(texts) ^ set(LOC["en"]))
@@ -2184,6 +2219,13 @@ def selftest():
     assert 0 < late["total"] < d["total"] and late["comp"]["rebuild"] > 0 and "tool:terminal" not in late["uses"]
     logged = analyze(db, -1, snap, 300, logs={"s": ([1.0, 3.0, 1001.0], [(5000, 0), (6000, 0), (6100, 0)])})
     assert logged["comp"]["break"] > 0 and abs(logged["total"] - real) < 1e-12 and logged["logged"] == 3  # break without pause
+    assert abs(sum(v for _, v in logged["breaks"].values()) - logged["comp"]["break"]) < 1e-12 and set(logged["breaks"]) <= set(BREAKS)
+    R = lambda role, content="": (role, content, None, None, None, None, 0, None)
+    rows, ap = [R("user"), R("assistant"), R("tool", "[screenshot] " * 4), R("assistant"), R("user", "next"), R("assistant"), R("tool", "x"), R("assistant")], [1, 3, 5, 7]
+    rl = [(100, 0), (200, 150), (300, 100), (250, 40)]
+    assert [break_cause(rows, ap, j, rl, 50) for j in (1, 2, 3)] == ["image", "turn", "shrunk"]
+    rl[3] = (350, 50)
+    assert (break_cause(rows, ap, 3, rl, 50), break_cause(rows, ap, 3, rl, 10), break_cause(rows, ap, 3, rl[:3] + [None], 10)) == ("deep", "other", "sim")
     assert abs(sum(sum(v.values()) for v in d["hours"].values()) - d["total"]) < 1e-12        # the history adds up
     assert sum(d["hsteps"].values()) == d["n_steps"] == 3
     # Projects: majority of paths, Hermes' own folder only without another project, system folders don't count
@@ -2289,7 +2331,7 @@ def selftest():
         assert abs(sum(day_costs().values()) - real) < 1e-9, (day_costs(), real)   # the calendar loses nothing
         cal = calendar({(datetime.now().date() - timedelta(days=1)).isoformat(): 2.0})
         assert cal.count('class="h4" title') == 1 and cal.count("<i ") >= 365 + 5, cal[:200]
-        leftover = re.compile(r"\b(?:th|set|cal|ovl|ev|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
+        leftover = re.compile(r"\b(?:th|set|cal|ovl|ev|brk|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
             SET["ntfy_topic"] = "usagecast-test" if code != "en" else ""   # English: not set up yet, the others: subscribe steps
