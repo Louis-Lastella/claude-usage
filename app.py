@@ -12,7 +12,7 @@ moment: tools, skills, plugins, system prompt parts, thinking, cache rebuilds af
 """
 import bisect, glob, gzip, html, json, math, os, re, secrets, sqlite3, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
@@ -98,12 +98,13 @@ def _env_ntfy():
 _SRV, _TOPIC = _env_ntfy()
 DEFAULTS = {
     "theme": "system", "lang": DEFAULT_LANG, "currency": "USD", "numbers": "compact", "period": DEFAULT_P, "limit_view": "used",
+    "cost_unit": "money",
     "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True,
     "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
     "push": "own" if _TOPIC else "off", "ntfy_server": _SRV, "ntfy_topic": _TOPIC, "ntfy_token": "", "url": PUBLIC_URL,
 }
 CHOICES = {"theme": ("system", "light", "dark"), "lang": tuple(LOC), "currency": ("USD", "EUR"), "numbers": ("compact", "full"),
-           "period": tuple(PERIODS), "limit_view": ("used", "left"), "push": ("off", "own", "hermes")}
+           "period": tuple(PERIODS), "limit_view": ("used", "left"), "cost_unit": ("money", "week"), "push": ("off", "own", "hermes")}
 RANGES = {"five_min": (5, 240)}
 URL_RX = r"https?://[^\s\"'<>]+"
 HHMM = r"([01]\d|2[0-3]):[0-5]\d"
@@ -196,6 +197,15 @@ def nf(v, digits=0):
 
 
 def money(v):
+    """API value in the chosen unit: money, or the estimated share of the weekly limit (RATE, see limit_split)."""
+    k = RATE.get("k") if SET["cost_unit"] == "week" else None
+    if not k:
+        return cash(v)
+    x = v * k
+    return "< " + tr("fmt.week", v=nf(0.1, 1)) if 0 < x < 0.1 else tr("fmt.week", v=nf(x, 1))
+
+
+def cash(v):
     rate = FX.get("rate") if SET["currency"] == "EUR" else None   # all prices are in dollars
     key, v = ("fmt.eur", v / rate) if rate else ("fmt.money", v)
     return "< " + tr(key, v=nf(0.01, 2)) if 0 < v < 0.01 else tr(key, v=nf(v, 2))
@@ -795,6 +805,79 @@ def refresh_limits(max_age):
             f.write(json.dumps(row) + "\n")
 
 
+# ---------- Limits: who used them ----------
+CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
+_CC = {}      # transcript -> (mtime, [(time, $)])
+RATE = {}     # limit_split over 30 days: k = weekly-limit % per API dollar
+
+
+def cc_calls(since):
+    """[(time, $)] of Claude Code's API calls on this machine since `since`, from its transcripts (deduplicated:
+    Claude Code writes one line per content block, all with the same message id and usage)."""
+    out = []
+    for p in CLAUDE.rglob("*.jsonl"):
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            continue
+        if m < since:
+            continue
+        if _CC.get(p, (None,))[0] != m:
+            seen, rows = set(), []
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        x = json.loads(line)
+                        msg, u = x["message"], x["message"]["usage"]
+                        key, model = (msg.get("id"), x.get("requestId")), str(msg.get("model") or "")
+                        t = datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00")).timestamp()
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        continue
+                    if x.get("type") != "assistant" or key in seen or not model.startswith("claude"):
+                        continue
+                    seen.add(key)
+                    w1h = (u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0
+                    pr = price(model)
+                    rows.append((t, (u.get("input_tokens") or 0) * pr[0] + (u.get("cache_read_input_tokens") or 0) * pr[3]
+                                 + ((u.get("cache_creation_input_tokens") or 0) - w1h) * pr[1] + w1h * pr[2]
+                                 + (u.get("output_tokens") or 0) * pr[4]))
+            _CC[p] = (m, rows)
+        out += [r for r in _CC[p][1] if r[0] >= since]
+    return out
+
+
+def limit_split(hist, hours, cc, since, min_cost=0.25):
+    """Who used the weekly limit since `since`, measured per clock hour: the growth between the 10-minute readings
+    goes to Hermes and Claude Code (split by their API cost in that hour) or, in hours where neither ran, to "other"
+    (Claude app, other devices). k = limit % per API dollar over the hours with Hermes or Claude Code. None without
+    readings."""
+    # ponytail: hour-level attribution; other usage in an hour where Hermes also ran counts as Hermes
+    pts = [h for h in hist if h["t"] >= since and h.get("seven_day") is not None]
+    if len(pts) < 2:
+        return None
+    ccost = defaultdict(float)
+    for t, c in cc:
+        ccost[t - t % 3600] += c
+    out, seen = {"hermes": 0.0, "cc": 0.0, "rest": 0.0}, set()
+    for a, b in zip(pts, pts[1:]):
+        du, h = b["seven_day"] - a["seven_day"], a["t"] - a["t"] % 3600
+        if du < 0 or b["t"] - a["t"] > 1800:   # weekly reset, or a gap without readings
+            continue
+        seen.add(h)
+        hc, c = sum(hours.get(h, {}).values()), ccost.get(h, 0.0)
+        if hc + c < min_cost:
+            out["rest"] += du
+        else:
+            out["hermes"] += du * hc / (hc + c)
+            out["cc"] += du * c / (hc + c)
+    cost = sum(sum(hours.get(h, {}).values()) + ccost.get(h, 0.0) for h in seen)
+    used = out["hermes"] + out["cc"]
+    out.update(start=pts[0]["t"], before=pts[0]["seven_day"], hours=len(seen),
+               gap=pts[-1]["seven_day"] - pts[0]["seven_day"] - used - out["rest"],
+               k=used / cost if cost >= 5 and used >= 5 else None)  # 1 % steps: below that it is mostly rounding
+    return out
+
+
 # ---------- Limits: forecast + alerts ----------
 WINDOWS = (("five_hour", 5 * 3600), ("seven_day", 7 * 86400), ("seven_day_opus", 7 * 86400), ("seven_day_sonnet", 7 * 86400))
 
@@ -1062,6 +1145,12 @@ def bars(items, tot, ttl, explain=True, n=12, p=None, soft=False, name_of=None):
     return out
 
 
+def dur(s):
+    """Rough duration: ~59 min, ~1 h 20 min."""
+    m = max(round(s / 60), 1)
+    return tr("dur.min", m=m) if m < 60 else tr("dur.hm", h=m // 60, m=m % 60)
+
+
 def until(t):
     if not t:
         return ""
@@ -1101,7 +1190,7 @@ def api_summary():
     return json.dumps(out)
 
 
-def limits_card(week_cost):
+def limits_card(week_cost, split=None):
     refresh_limits(120)
     L, now = STATE["limits"], time.time()
     if not L:
@@ -1119,14 +1208,21 @@ def limits_card(week_cost):
             elif fc > 100:
                 txt = tr("lim.week.over", full=when(start + (now - start) * 100 / u, "daytime"), reset=until(reset))
             else:
-                txt = tr("lim.week.lands", fc=pc(fc), frac=pc(frac * 100), reset=until(reset))
+                txt = tr("lim.week.lands", fc=tr("lim.left", p=pc(100 - fc)) if lv else pc(fc), frac=pc(frac * 100), reset=until(reset))
             left = (f'<div class="lbl">{tr("lim.week")}</div><div class="big">{nf(100 - u if lv else u)}<span>{tr("lim.unit.left" if lv else "lim.unit")}</span></div>'
                     f'{meter(u, frac, u >= 80 or (fc or 0) > 100, lv)}<p class="fc">{txt}</p>')
             if u < 100 and reset:
                 # ponytail: even split of what is left; "left today" would need the limit value at midnight
                 left += f'<p class="why">{tr("lim.budget", pct=pc((100 - u) / max((reset - now) / 86400, 1)))}</p>'
             if week_cost is not None:
-                left += f'<p class="why">{tr("lim.weekcost", cost=money(week_cost))}</p>'
+                left += f'<p class="why">{tr("lim.weekcost", cost=cash(week_cost))}</p>'
+            if split and split["hermes"] + split["cc"] + split["rest"] >= 1:
+                parts = {k: pc(split[k]) for k in ("hermes", "cc", "rest")}
+                more = "".join(" " + tr("lim.split." + k, p=pc(split[k])) for k in ("before", "gap") if split[k] >= 1)
+                left += (f'<p class="why">{tr("lim.split" if CLAUDE.is_dir() else "lim.split.nocc", start=when(split["start"], "daytime"), **parts)}'
+                         f'{more}</p>')
+            if RATE.get("k"):
+                left += f'<p class="why">{tr("lim.rate", cost=cash(1 / RATE["k"]), n=RATE["hours"])}</p>'
             continue
         hot = u >= 80
         if u >= 100:
@@ -1135,9 +1231,10 @@ def limits_card(week_cost):
             r = rate(hist, key, u, start, now) if reset else None
             fa = now + (100 - u) / r if r else None
             if fa and fa < reset:
-                txt, hot = tr("lim.five.full_at", full=hm(fa), reset=until(reset)), hot or fa - now < 1800
+                txt, hot = tr("lim.five.full_at", left=dur(fa - now), full=hm(fa), reset=until(reset)), hot or fa - now < 1800
             elif r is not None:
-                txt = tr("lim.five.enough", reset=hm(reset), at=pc(min(u + r * (reset - now), 100)))
+                at = min(u + r * (reset - now), 100)
+                txt = tr("lim.five.enough", reset=hm(reset), at=tr("lim.left", p=pc(100 - at)) if lv else pc(at))
             else:
                 txt = until(reset)
         else:
@@ -1235,6 +1332,15 @@ def compute(p):
         since, week = since_for(p)
         d = analyze(connect(), since, load_snap(), cache_ttl())
         d.update(week=week, p=p, at=time.time())
+        if p == "30":
+            r = limit_split(limit_history(30), d["hours"], cc_calls(since), since) or {}
+            k, (ws, wk) = r.get("k"), since_for("w")
+            u, cw = ((STATE["limits"] or {}).get("seven_day") or {}).get("utilization"), sum(
+                sum(v.values()) for h, v in d["hours"].items() if h >= ws)
+            if k and wk and u and cw:
+                k = min(k, u / cw)   # ponytail: the rate drifts; never let Hermes' week cost exceed the measured week
+            RATE.clear()
+            RATE.update(k=k, hours=r.get("hours", 0))
         with LOCK:
             CACHE[p] = (time.time(), d)
         return d
@@ -1311,7 +1417,8 @@ def page_overview(p):
         for i, (m, x) in enumerate(models, 1)) + "</ol>"
     logged = tr("ov.logged", p=pc(d["logged"] / (d["n_steps"] or 1) * 100))
     push = "" if ntfy_target() else f'<p class="hint pushoff">{tr("ov.push", url="/settings#push")}</p>'
-    body = f"""{limits_card(w["total"] if w["week"] else None)}{push}
+    split = limit_split(limit_history(), d30["hours"], cc_calls(w["since"]), w["since"]) if w["week"] else None
+    body = f"""{limits_card(w["total"] if w["week"] else None, split)}{push}
 <div class="kpis">{kpi_html}</div>
 <div class="grid g2">
 <section class="card"><h2>{tr("ov.eats")}</h2>
@@ -1602,6 +1709,8 @@ def page_settings(q):
             + field("numbers", T("numbers"), opts("numbers", [(v, T("numbers." + v)) for v in CHOICES["numbers"]]))
             + field("period", T("period"), select("period", [(k, tr("period." + k)) for k in PERIODS], s["period"]), T("period.why")))
     limits = field("limit_view", T("view"), opts("limit_view", [(v, T("view." + v)) for v in CHOICES["limit_view"]]), T("view.why"))
+    rate = tr("lim.rate", cost=cash(1 / RATE["k"]), n=RATE["hours"]) if RATE.get("k") else T("cost.none")
+    limits += field("cost_unit", T("cost"), opts("cost_unit", [(v, T("cost." + v)) for v in CHOICES["cost_unit"]]), T("cost.why") + " " + rate)
     lo, hi = RANGES["five_min"]
     five = (f'{check("alert_five")}<input type="number" id="five_min" name="five_min" value="{s["five_min"]}" min="{lo}" max="{hi}"'
             f' inputmode="numeric" aria-label="{T("a.five.min")}"><span class="why">{T("min")}</span>')
@@ -1760,7 +1869,7 @@ def test_db(base=0.0):
 
 
 def selftest():
-    global HERMES, DATA
+    global HERMES, DATA, CLAUDE
     SET.clear(); SET.update(DEFAULTS); FX.clear()   # the installed settings must not change the expected formats
     # Locales: same keys and placeholders everywhere, every literal key used in the code exists
     src = Path(__file__).read_text("utf-8")
@@ -1787,6 +1896,15 @@ def selftest():
     SET.update(currency="EUR", numbers="full"); FX["rate"] = 1.25
     assert (money(10), num(1_234_567)) == ("€8.00", "1,234,567")
     SET.update(currency="USD", numbers="compact"); FX.clear()
+    SET["cost_unit"], RATE["k"] = "week", 0.5
+    assert (money(4), money(0.1), cash(4), dur(59 * 60), dur(80 * 60)) == ("2.0% of week", "< 0.1% of week", "$4.00", "~59 min", "~1 h 20 min")
+    SET["cost_unit"] = "money"; RATE.clear()
+    # Limit split: the growth of each hour goes to whoever ran then, gaps without readings count for nobody
+    vals = [10 + i for i in range(7)] + [16 + i for i in range(1, 7)] + [22 + 0.5 * i for i in range(1, 7)]
+    hist = [{"t": 7200 + 600 * i, "seven_day": v} for i, v in enumerate(vals)] + [{"t": 7200 + 600 * 18 + 3600, "seven_day": 27}]
+    sp = limit_split(hist, {7200: {"tool:x": 6.0}}, [(10800 + 100, 2.0)], 0)
+    assert {k: sp[k] for k in ("hermes", "cc", "rest", "gap", "before", "hours")} == {"hermes": 6, "cc": 6, "rest": 3, "gap": 2, "before": 10, "hours": 3}, sp
+    assert sp["k"] == 1.5 and limit_split(hist[:1], {}, [], 0) is None
     # Config, markers, prices
     cfg = ("model:\n  default: m\n  provider: anthropic\nmemory:\n\n  provider: memory_tencentdb\n"
            "plugins:\n  enabled:\n    - ponytail\n    - 'superpowers'\n    - platforms/ntfy\n  disabled: []\n")
@@ -1869,6 +1987,15 @@ def selftest():
         db.backup(disk := sqlite3.connect(Path(tmp) / "state.db"))
         disk.close()
         STATE["at"] = time.time()  # no limit fetch during the test
+        cl = Path(tmp) / "claude" / "projects" / "-x"
+        cl.mkdir(parents=True)
+        msg = {"type": "assistant", "requestId": "r", "timestamp": "2026-10-08T10:00:00Z", "message": {"id": "m", "model": "claude-opus-5-5",
+               "usage": {"input_tokens": 10, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 300, "output_tokens": 50,
+                         "cache_creation": {"ephemeral_1h_input_tokens": 100}}}}
+        (cl / "s.jsonl").write_text(json.dumps(msg) + "\n" + json.dumps(msg) + "\n" + '{"type": "user"}\n')
+        CLAUDE = cl.parent
+        pr = price("claude-opus-5-5")
+        assert cc_calls(0) == [(datetime(2026, 10, 8, 10, tzinfo=timezone.utc).timestamp(), 10 * pr[0] + 1000 * pr[3] + 200 * pr[1] + 100 * pr[2] + 50 * pr[4])]
         save_settings({**SET, "currency": "EUR"})
         assert load_settings()["currency"] == "EUR" and (DATA / "settings.json").stat().st_mode & 0o777 == 0o600
         SET["currency"] = "USD"
