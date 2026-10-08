@@ -1053,16 +1053,45 @@ def since_for(p):
     return time.time() - PERIODS[p] * 86400, False
 
 
-def data_for(p):
-    with LOCK:
-        hit = CACHE.get(p)
-        if hit and time.time() - hit[0] < 120:
-            return hit[1]
+REFRESHING = set()
+
+
+def compute(p):
+    try:
         since, week = since_for(p)
         d = analyze(connect(), since, load_snap(), cache_ttl())
         d.update(week=week, p=p, at=time.time())
-        CACHE[p] = (time.time(), d)
+        with LOCK:
+            CACHE[p] = (time.time(), d)
         return d
+    finally:
+        with LOCK:
+            REFRESHING.discard(p)
+
+
+def data_for(p):
+    """Fresh cache (< 120 s) as is; a stale one is served at once and recomputed in the background."""
+    with LOCK:
+        hit = CACHE.get(p)
+        if hit and (time.time() - hit[0] < 120 or p in REFRESHING):
+            return hit[1]
+        if hit:
+            REFRESHING.add(p)
+    if hit:
+        threading.Thread(target=compute, args=(p,), daemon=True).start()
+        return hit[1]
+    return compute(p)
+
+
+def warm():
+    """Keeps the periods of the overview precomputed, so no page load waits for the analysis."""
+    while True:
+        for p in ("w", "30"):
+            try:
+                compute(p)
+            except Exception as e:  # noqa: BLE001 - keep warming, the page computes on demand anyway
+                print("warm:", e, flush=True)
+        time.sleep(300)
 
 
 def period_text(d):
@@ -1459,6 +1488,8 @@ def selftest():
     assert segments("me\n# memory-tencentdb\nx", pm)[-1][0] == "plugin:memory_tencentdb"   # - and _ are equivalent
     assert price("claude-opus-5-5")[0] == 4e-6 and price("claude-opus-4-8")[4] == 25e-6 and price("claude-opus-4-1-x")[0] == 15e-6
     assert known_model("claude-opus-5-5") and not known_model("claude-opus-9")
+    CACHE["t"] = (0, "stale"); REFRESHING.add("t")
+    assert data_for("t") == "stale"; CACHE.pop("t"); REFRESHING.discard("t")
     # Replay and cache
     db, msgs = test_db()
     calls, _ = simulate(msgs, {"schema": 100.0})
@@ -1535,5 +1566,6 @@ if __name__ == "__main__":
         os._exit(0)  # AIAgent can leave background threads (MCP) running
     else:
         threading.Thread(target=background, daemon=True).start()
+        threading.Thread(target=warm, daemon=True).start()
         print(f"usagecast on http://127.0.0.1:{PORT}", flush=True)
         ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
