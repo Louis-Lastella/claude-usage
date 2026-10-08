@@ -1023,7 +1023,7 @@ def digest(now, sent, L, get=None, s=None):
         return None
     w, d30 = get("w"), get("30")
     prev = sum(sum(v.values()) for h, v in d30["hours"].items() if w["since"] - 7 * 86400 <= h < now - 7 * 86400)
-    delta = tr("alert.digest.delta", d=("+" if w["total"] >= prev else "−") + pc(abs(w["total"] / prev - 1) * 100)) if prev else ""
+    delta = tr("alert.digest.delta", d=signed(w["total"], prev)) if prev else ""
     top, wk = ranked(w["comp"]), next((x for x in windows(L, now) if x[0] == "seven_day"), None)
     return tag, tr("alert.digest"), tr("alert.digest.text", u=pc(wk[1]) if wk else "–", reset=when(wk[3], "daytime") if wk and wk[3] else "–",
                                        cost=cash(w["total"]), delta=delta, top=label(top[0][0], w["ttl"])[0] if top else "–")
@@ -1452,6 +1452,21 @@ def window_sum(d, since):
     return sum(sum(v.values()) for h, v in d["hours"].items() if h >= h0)
 
 
+def span_sum(d, a, b):
+    return sum(sum(v.values()) for h, v in d["hours"].items() if a <= h < b)
+
+
+def signed(cur, prev):
+    """+18 % / −7 %: change against an earlier value."""
+    return ("+" if cur >= prev else "−") + pc(abs(cur / prev - 1) * 100)
+
+
+def week_delta(d30, cur, since, now):
+    """"+18 % vs. last week" for a stretch since `since`, against the same stretch seven days earlier."""
+    prev = span_sum(d30, since - 7 * 86400, now - 7 * 86400)
+    return tr("kpi.delta", d=signed(cur, prev)) if prev > 0.01 and since >= now - 7.01 * 86400 else ""
+
+
 def per_day(d):
     """{day start: [{component: $}, steps, {sessions}]}"""
     out = defaultdict(lambda: [defaultdict(float), 0, set()])
@@ -1470,8 +1485,11 @@ def page_overview(p):
     tot, ttl, now = d["total"] or 1, d["ttl"], time.time()
     active = {floor(h, False) for h, v in d30["hours"].items() if sum(v.values()) > 0}
     sums = {"1": window_sum(d30, now - 86400), "7": window_sum(d30, now - 7 * 86400), "30": d30["total"]}
-    kpis = [("main", pname(p), money(d["total"]), tr("kpi.main.sub", tokens=num(d["tokens"]), steps=cnt(d["calls"])))]
-    kpis += [("", tr("period." + k), money(sums[k]), tr("kpi.api")) for k in [k for k in ("7", "30", "1") if k != p][:2]]
+    dl = lambda v, since: f'<small class="d">{x}</small>' if (x := week_delta(d30, v, since, now)) else ""
+    kpis = [("main", pname(p), money(d["total"]), tr("kpi.main.sub", tokens=num(d["tokens"]), steps=cnt(d["calls"]))
+             + (dl(d["total"], d["since"]) if p in ("w", "7") else ""))]
+    kpis += [("", tr("period." + k), money(sums[k]), tr("kpi.api") + (dl(sums[k], now - 7 * 86400) if k == "7" else ""))
+             for k in [k for k in ("7", "30", "1") if k != p][:2]]
     kpis += [("", tr("kpi.avg"), money(d30["total"] / max(len(active), 1)), tr("kpi.avg.sub", n=len(active))),
              ("", tr("kpi.sessions"), cnt(len(d["sess"])), tr("kpi.sessions.sub"))]
     kpi_html = "".join(f'<div class="kpi {c}"><span>{l}</span><b>{v}</b><small>{s}</small></div>' for c, l, v, s in kpis)
@@ -1611,6 +1629,31 @@ def calendar(days, today=None):
             f'<p class="hint">{tr("cal.sum", n=len(active), total=len(shown), day=when(datetime(bd.year, bd.month, bd.day).timestamp(), "day"), v=money(bv))}</p>')
 
 
+def overlay(w, d30):
+    """Cumulative API value through the limit week: this week over the three before, all from the same start."""
+    now, wk = time.time(), 7 * 86400
+    hrs, lines, top = sorted(d30["hours"].items()), [], 0.0
+    for k in range(4):
+        s, acc, pts = w["since"] - k * wk, 0.0, [(0.0, 0.0)]
+        for h, comp in hrs:
+            if s <= h < min(s + wk, now):
+                acc += sum(comp.values())
+                pts.append((min((h + 3600 - s) / wk, 1.0), acc))
+        lines.append(pts)
+        top = max(top, acc)
+    if not top or len(lines[1]) < 2:
+        return f'<p class="hint">{tr("nodata")}</p>'
+    svg = "".join(f'<polyline class="w{k}" points="{" ".join(f"{x * 100:.2f},{100 - v / top * 96:.2f}" for x, v in pts)}"/>'
+                  for k, pts in reversed(list(enumerate(lines))))
+    days = "".join(f"<span>{LOC[lang()]['weekdays'][datetime.fromtimestamp(w['since'] + i * 86400).weekday()]}</span>" for i in range(7))
+    same = span_sum(d30, w["since"] - wk, now - wk)
+    cur = lines[0][-1][1]
+    note = tr("ovl.now", cur=money(cur), prev=money(same), d=signed(cur, same)) if same > 0.01 else ""
+    return (f'<svg class="ovl" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="{tr("ovl.title")}">{svg}</svg>'
+            f'<div class="axis days">{days}</div><div class="lg"><span><span class="dot c0"></span>{tr("ovl.this")}</span>'
+            f'<span><span class="dot f"></span>{tr("ovl.before")}</span></div>' + (f'<p class="hint">{note}</p>' if note else ""))
+
+
 def page_history(p):
     d, d30 = data_for(p), data_for("30")
     tot, ttl = d["total"] or 1, d["ttl"]
@@ -1626,6 +1669,8 @@ def page_history(p):
 {stacked(d)}</section>
 <section class="card"><h2>{tr("hist.when")}</h2>
 <p class="hint">{tr("hist.when.hint")}</p>{heatmap(d30)}</section>
+<section class="card"><h2>{tr("ovl.title")}</h2>
+<p class="hint">{tr("ovl.hint")}</p>{overlay(data_for("w"), d30)}</section>
 <section class="card"><h2>{tr("cal.title")}</h2>
 <p class="hint">{tr("cal.hint")}</p>{calendar(day_costs())}</section>
 <section class="sec"><h2>{tr("hist.days")}</h2>
@@ -2029,6 +2074,10 @@ def selftest():
     sp = limit_split(hist, {7200: {"tool:x": 6.0}}, [(10800 + 100, 2.0)], 0)
     assert {k: sp[k] for k in ("hermes", "cc", "rest", "gap", "before", "hours")} == {"hermes": 6, "cc": 6, "rest": 3, "gap": 2, "before": 10, "hours": 3}, sp
     assert sp["k"] == 1.5 and limit_split(hist[:1], {}, [], 0) is None
+    assert (signed(12, 10), signed(8, 10)) == ("+20%", "−20%")
+    t0 = 1_800_000_000.0
+    d30 = {"hours": {t0 - 8 * 86400: {"x": 10.0}, t0 - 3600: {"x": 12.0}}}
+    assert week_delta(d30, 12.0, t0 - 86400, t0) == "+20% vs. last week" and week_delta(d30, 12.0, t0 - 20 * 86400, t0) == ""
     # Config, markers, prices
     cfg = ("model:\n  default: m\n  provider: anthropic\nmemory:\n\n  provider: memory_tencentdb\n"
            "plugins:\n  enabled:\n    - ponytail\n    - 'superpowers'\n    - platforms/ntfy\n  disabled: []\n")
@@ -2160,7 +2209,7 @@ def selftest():
         assert abs(sum(day_costs().values()) - real) < 1e-9, (day_costs(), real)   # the calendar loses nothing
         cal = calendar({(datetime.now().date() - timedelta(days=1)).isoformat(): 2.0})
         assert cal.count('class="h4" title') == 1 and cal.count("<i ") >= 365 + 5, cal[:200]
-        leftover = re.compile(r"\b(?:th|set|cal|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
+        leftover = re.compile(r"\b(?:th|set|cal|ovl|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
             SET["ntfy_topic"] = "usagecast-test" if code != "en" else ""   # English: not set up yet, the others: subscribe steps
