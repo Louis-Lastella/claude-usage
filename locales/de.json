@@ -227,6 +227,7 @@
   "ses.steps": "{n} Schritte",
   "ses.logged": "Für {p} der Schritte lagen echte Werte aus Hermes' Log vor.",
   "ses.eats": "Was in dieser Session gefressen hat",
+  "ses.resume": "Im Terminal fortsetzen (antippen zum Markieren):",
   "ses.steps_h": "Schritt für Schritt",
   "ses.steps.hint": "Verlauf = wie viele Tokens dieser Schritt mitlesen musste. Neuaufbau = was es kostete, den Verlauf neu in den Cache zu schreiben, weil er nach einer Pause verfallen oder ohne Pause verloren gegangen war ({n} Mal, zusammen {cost}).",
   "ses.after_pause": "nach Pause",

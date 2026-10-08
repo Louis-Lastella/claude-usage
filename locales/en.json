@@ -227,6 +227,7 @@
   "ses.steps": "{n} steps",
   "ses.logged": "For {p} of the steps Hermes' log had real numbers.",
   "ses.eats": "What ate the most in this session",
+  "ses.resume": "Continue it in the terminal (tap to select):",
   "ses.steps_h": "Step by step",
   "ses.steps.hint": "History = how many tokens this step had to read. Rebuild = what it cost to write the history into the cache again because it had expired after a pause or was lost without one ({n} times, {cost} in total).",
   "ses.after_pause": "after a pause",

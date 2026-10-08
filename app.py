@@ -1385,7 +1385,8 @@ def page_session(sid, p):
                       tr("ses.project", name=e(proj_label(x["project"] or NO_PROJ))),
                       tr("ses.started", at=when(x["started"] or 0, "datetime")), tr("ses.steps", n=cnt(x["calls"])), money(x["cost"])])
     logged = tr("ses.logged", p=pc(d["logged"] / d["n_steps"] * 100)) if d["n_steps"] else ""
-    body = f"""<section class="card"><h2>{tr("ses.eats")}</h2>
+    body = f"""<p class="hint">{tr("ses.resume")} <code class="cmd">hermes --resume {e(sid)}</code></p>
+<section class="card"><h2>{tr("ses.eats")}</h2>
 {bars(ranked(d["comp"], group_skills=False), tot, ttl, explain=False, n=40)}</section>
 <section class="sec"><h2>{tr("ses.steps_h")}</h2>
 <p class="hint">{tr("ses.steps.hint", n=len(rb), cost=money(sum(s[3] for s in rb)))} {logged}</p>

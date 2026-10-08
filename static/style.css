@@ -174,3 +174,4 @@ th,td{padding:9px 9px}.o{display:none}
 .search input{width:100%}.search{flex:1 1 100%}
 }
 @media (max-width:400px){th,td{padding:8px 6px}td:first-child,th:first-child{padding-left:12px}td:last-child,th:last-child{padding-right:12px}}
+.cmd{-webkit-user-select:all;user-select:all;cursor:text}
