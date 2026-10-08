@@ -818,6 +818,20 @@ def load_snap():
         return {}
 
 
+STATUS_URL = "https://status.claude.com"
+STATUS = {}
+
+
+def refresh_status():
+    """Claude's public status page; an incident shows up as a line under the limits."""
+    try:
+        with urllib.request.urlopen(STATUS_URL + "/api/v2/status.json", timeout=15) as r:
+            st = json.loads(r.read())["status"]
+        STATUS.clear(); STATUS.update(st)
+    except (OSError, ValueError, KeyError):
+        STATUS.clear()
+
+
 def background():
     while True:
         snap = DATA / "snapshot.json"
@@ -829,6 +843,7 @@ def background():
                 print("snapshot:", e, flush=True)
         refresh_limits(540)
         check_alerts()
+        refresh_status()
         time.sleep(600)
 
 
@@ -996,6 +1011,8 @@ def limits_card(week_cost):
     left = left or f'<div class="lbl">{tr("lim.week")}</div><p class="hint">{tr("nodata")}</p>'
     stale = now - STATE["ok"] > 1800
     stamp = tr("lim.stale", at=when(STATE["ok"], "daytime")) if stale else tr("lim.stamp", at=hm(STATE["ok"]))
+    if STATUS.get("indicator") not in (None, "none"):
+        stamp += "<br>" + tr("lim.status", desc=html.escape(STATUS.get("description", "")), url=STATUS_URL)
     return (f'<section class="card hero" aria-label="{tr("lim.title")}"><div>{left}</div><div>{right}'
             f'<p class="why">{stamp}</p></div>{spark}</section>')
 

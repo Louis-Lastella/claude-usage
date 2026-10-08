@@ -122,6 +122,7 @@
   "lim.trend.week": "Week",
   "lim.trend.five": "5 h",
   "lim.stale": "<strong>Outdated:</strong> as of {at}, fetching fails right now.",
+  "lim.status": "<strong>Claude reports a problem:</strong> {desc}. <a href=\"{url}\">Status page</a>",
   "lim.stamp": "As of {at}, checked every 10 minutes.",
   "until.min": "Reset in {m} min",
   "until.hm": "Reset in {h} h {m} min",

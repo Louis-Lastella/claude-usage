@@ -122,6 +122,7 @@
   "lim.trend.week": "Woche",
   "lim.trend.five": "5 Std.",
   "lim.stale": "<strong>Veraltet:</strong> Stand {at}, der Abruf klappt gerade nicht.",
+  "lim.status": "<strong>Claude meldet eine Störung:</strong> {desc}. <a href=\"{url}\">Statusseite</a>",
   "lim.stamp": "Stand {at}, wird alle 10 Minuten abgefragt.",
   "until.min": "Reset in {m} Min.",
   "until.hm": "Reset in {h} Std. {m} Min.",
