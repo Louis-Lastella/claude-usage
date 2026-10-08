@@ -10,7 +10,7 @@ moment: tools, skills, plugins, system prompt parts, thinking, cache rebuilds af
   python3 app.py --ntfy-test              send a test alert
   <hermes-venv>/python app.py --snapshot  measure system prompt parts and tool schemas (the server does this daily)
 """
-import bisect, glob, gzip, html, json, math, os, re, sqlite3, subprocess, sys, tempfile, threading, time, traceback, urllib.request
+import bisect, glob, gzip, html, json, math, os, re, secrets, sqlite3, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,7 +68,7 @@ _req = threading.local()   # language and URL of the request being rendered
 
 
 def lang():
-    return getattr(_req, "lang", None) or DEFAULT_LANG
+    return getattr(_req, "lang", None) or SET["lang"]
 
 
 def tr(key, **kw):
@@ -79,11 +79,115 @@ def tr(key, **kw):
 
 
 def pick_lang(wanted, headers):
-    """?lang= beats the cookie, then USAGECAST_LANG (English). English first: the browser language is not used."""
+    """?lang= beats the cookie, then the saved language (USAGECAST_LANG, English). The browser language is not used."""
     if wanted in LOC:
         return wanted
     m = re.search(r"(?:^|;)\s*lang=([a-z]+)", headers.get("Cookie", ""))
-    return m.group(1) if m and m.group(1) in LOC else DEFAULT_LANG
+    return m.group(1) if m and m.group(1) in LOC else SET["lang"]
+
+
+# ---------- Settings ----------
+# /settings saves them in data/settings.json; the environment variables only give the defaults.
+def _env_ntfy():
+    """(server, topic) from USAGECAST_NTFY, a full topic URL."""
+    url = os.environ.get("USAGECAST_NTFY", "")
+    u = urlparse(url if "://" in url else "https://" + url)
+    return (f"{u.scheme}://{u.netloc}", u.path.strip("/")) if url else ("https://ntfy.sh", "")
+
+
+_SRV, _TOPIC = _env_ntfy()
+DEFAULTS = {
+    "theme": "system", "lang": DEFAULT_LANG, "currency": "USD", "numbers": "compact", "period": DEFAULT_P, "limit_view": "used",
+    "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True,
+    "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
+    "push": "own" if _TOPIC else "off", "ntfy_server": _SRV, "ntfy_topic": _TOPIC, "ntfy_token": "", "url": PUBLIC_URL,
+}
+CHOICES = {"theme": ("system", "light", "dark"), "lang": tuple(LOC), "currency": ("USD", "EUR"), "numbers": ("compact", "full"),
+           "period": tuple(PERIODS), "limit_view": ("used", "left"), "push": ("off", "own", "hermes")}
+RANGES = {"five_min": (5, 240)}
+URL_RX = r"https?://[^\s\"'<>]+"
+HHMM = r"([01]\d|2[0-3]):[0-5]\d"
+FORMATS = {"quiet_from": HHMM, "quiet_to": HHMM, "ntfy_topic": r"[A-Za-z0-9_-]{1,64}", "ntfy_server": URL_RX, "url": f"({URL_RX})?"}
+
+
+def load_settings():
+    try:
+        saved = json.loads((DATA / "settings.json").read_text())
+    except (OSError, ValueError):
+        saved = {}
+    ok = lambda k, d: type(saved.get(k)) is type(d) and (k not in CHOICES or saved[k] in CHOICES[k])
+    return {k: saved[k] if ok(k, d) else d for k, d in DEFAULTS.items()}
+
+
+SET = load_settings()
+
+
+def clean(form, cur):
+    """Settings from a submitted /settings form: a missing checkbox is off, an invalid value keeps the old one."""
+    s = dict(cur)
+    for k, d in DEFAULTS.items():
+        v = form.get(k, "").strip()
+        if isinstance(d, bool):
+            s[k] = k in form
+        elif k in CHOICES:
+            s[k] = v if v in CHOICES[k] else s[k]
+        elif k in RANGES:
+            s[k] = min(max(int(v), RANGES[k][0]), RANGES[k][1]) if v.isdigit() else s[k]
+        elif k == "ntfy_token":
+            s[k] = "" if "token_clear" in form else v or s[k]   # empty field = keep the saved token
+        elif k in form and re.fullmatch(FORMATS[k], v):
+            s[k] = v.rstrip("/")
+    return s
+
+
+def save_settings(s):
+    DATA.mkdir(parents=True, exist_ok=True)
+    tmp = DATA / "settings.json.tmp"
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:  # holds the ntfy token
+        json.dump(s, fh, indent=1)
+    tmp.replace(DATA / "settings.json")
+    SET.clear()
+    SET.update(s)
+
+
+def new_topic():
+    return "usagecast-" + secrets.token_hex(8)   # whoever knows a ntfy topic can read it, so 64 random bits
+
+
+def quiet_now(now, s=None):
+    s = s or SET
+    t, a, b = datetime.fromtimestamp(now).strftime("%H:%M"), s["quiet_from"], s["quiet_to"]
+    return s["quiet"] and (a <= t < b if a <= b else t >= a or t < b)
+
+
+def same_origin(h):
+    """Settings are saved only from Usagecast's own pages: the browser's Sec-Fetch-Site (https), else Origin vs Host."""
+    if h.get("Sec-Fetch-Site"):
+        return h["Sec-Fetch-Site"] == "same-origin"
+    o = urlparse(h.get("Origin") or "")
+    return bool(o.netloc) and o.netloc == h.get("Host")
+
+
+FX = {}   # ECB reference rate: rate = dollars per euro
+try:
+    FX.update(json.loads((DATA / "fx.json").read_text()))
+except (OSError, ValueError):
+    pass
+
+
+def refresh_fx(max_age=6 * 3600):
+    """Euro amounts use the ECB's daily reference rate (published on working days around 16:00 CET)."""
+    if time.time() - FX.get("at", 0) < max_age:
+        return
+    try:
+        with urllib.request.urlopen("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml", timeout=15) as r:
+            x = r.read().decode()
+        FX.update(rate=float(re.search(r"currency=.USD. rate=.([\d.]+)", x)[1]), date=re.search(r"time=.([\d-]+)", x)[1], at=time.time())
+    except (OSError, ValueError, TypeError) as err:
+        print("fx:", err, flush=True)
+        return
+    DATA.mkdir(parents=True, exist_ok=True)
+    (DATA / "fx.json").write_text(json.dumps(FX))
 
 
 def nf(v, digits=0):
@@ -92,7 +196,9 @@ def nf(v, digits=0):
 
 
 def money(v):
-    return "< " + tr("fmt.money", v=nf(0.01, 2)) if 0 < v < 0.01 else tr("fmt.money", v=nf(v, 2))
+    rate = FX.get("rate") if SET["currency"] == "EUR" else None   # all prices are in dollars
+    key, v = ("fmt.eur", v / rate) if rate else ("fmt.money", v)
+    return "< " + tr(key, v=nf(0.01, 2)) if 0 < v < 0.01 else tr(key, v=nf(v, 2))
 
 
 def pct(v, tot):
@@ -105,6 +211,8 @@ def pc(u):
 
 def num(n):
     n = float(n or 0)
+    if SET["numbers"] == "full":
+        return nf(n)
     if n >= 1e6:
         return tr("num.m", v=nf(n / 1e6, 1))
     return tr("num.k", v=nf(n / 1e3)) if n >= 1e3 else nf(n)
@@ -720,9 +828,10 @@ def rate(hist, key, u, start, now):
     return max((u - pts[0][key]) / (now - pts[0]["t"]), 0.0)
 
 
-def alerts(L, hist, sent, now):
+def alerts(L, hist, sent, now, s=None):
     """Due alerts [(tag, title, text)] and the new state. A tag stands for one window; the caller stores it after a
-    successful send, so every alert comes at most once per window."""
+    successful send, so every alert comes at most once per window. s: settings (switches, 5-hour threshold)."""
+    s = s or SET
     sent, out, full = {k: v for k, v in sent.items() if k == "extra_used" or now - v < 8 * 86400}, [], []
     for key, u, frac, reset, length in windows(L, now):
         name = tr("win." + key)
@@ -734,11 +843,11 @@ def alerts(L, hist, sent, now):
         if length <= 5 * 3600:
             r = rate(hist, key, u, reset - length, now)
             fa = now + (100 - u) / r if r else None
-            if fa and fa - now < 1800 and fa < reset:
+            if s["alert_five"] and fa and fa - now < s["five_min"] * 60 and fa < reset:
                 out.append((tag, tr("alert.five", name=name), tr("alert.five.text", u=pc(u), full=hm(fa), reset=hm(reset))))
         else:
             fc = week_forecast(u, frac)
-            if fc and fc > 100 and frac >= 1 / 7:
+            if s["alert_week"] and fc and fc > 100 and frac >= 1 / 7:
                 start = reset - length
                 out.append((tag, tr("alert.week", name=name),
                             tr("alert.week.text", u=pc(u), frac=pc(frac * 100), full=when(start + (now - start) * 100 / u, "daytime"),
@@ -749,7 +858,7 @@ def alerts(L, hist, sent, now):
         prev = sent.get("extra_used")
         reset = next((w[3] for w in windows(L, now) if w[3]), 0)  # 5-hour window first, otherwise the week
         tag = f"extra:{reset:.0f}"
-        if prev is not None and used > prev and tag not in sent:  # the state stays old until the alert went out
+        if s["alert_extra"] and prev is not None and used > prev and tag not in sent:  # the state stays old until the alert went out
             dp = 10 ** (x.get("decimal_places") or 0)
             out.append((tag, tr("alert.extra"), tr("alert.extra.text", used=nf(used / dp, 2),
                                                      limit=nf((x.get("monthly_limit") or 0) / dp, 2), cur=x.get("currency") or "",
@@ -759,39 +868,52 @@ def alerts(L, hist, sent, now):
     return out, sent
 
 
-def ntfy_target():
-    """(server, topic, token) from USAGECAST_NTFY (full URL) or Hermes' ntfy settings in .env, otherwise None."""
-    url, token = os.environ.get("USAGECAST_NTFY", ""), None
-    if not url:
-        env = {}
-        try:
-            for line in (HERMES / ".env").read_text().splitlines():
-                k, _, v = line.partition("=")
-                if k.strip().startswith("NTFY_"):
-                    env[k.strip()] = v.strip().strip("'\"")
-        except OSError:
-            pass
-        if env.get("NTFY_HOME_CHANNEL"):
-            url, token = f"{env.get('NTFY_SERVER_URL') or 'https://ntfy.sh'}/{env['NTFY_HOME_CHANNEL']}", env.get("NTFY_TOKEN")
-    if not url:
+def hermes_ntfy():
+    """(server, topic, token) of the channel Hermes itself sends to (NTFY_* in ~/.hermes/.env), otherwise None."""
+    env = {}
+    try:
+        for line in (HERMES / ".env").read_text().splitlines():
+            k, _, v = line.partition("=")
+            if k.strip().startswith("NTFY_"):
+                env[k.strip()] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    if not env.get("NTFY_HOME_CHANNEL"):
         return None
-    u = urlparse(url if "://" in url else "https://" + url)
-    return f"{u.scheme}://{u.netloc}", u.path.strip("/"), token
+    return (env.get("NTFY_SERVER_URL") or "https://ntfy.sh").rstrip("/"), env["NTFY_HOME_CHANNEL"], env.get("NTFY_TOKEN")
 
 
-def notify(title, text):
+def ntfy_target():
+    """(server, topic, token) of the push target chosen in the settings, None while push is off."""
+    if SET["push"] == "hermes":
+        return hermes_ntfy()
+    if SET["push"] == "own" and SET["ntfy_topic"]:
+        return SET["ntfy_server"], SET["ntfy_topic"], SET["ntfy_token"] or None
+    return None
+
+
+def send_push(title, text, prio=4):
+    """(sent, the server's reply). Priority 4 = high (limit almost full, week won't last), 3 = normal, 2 = low."""
     t = ntfy_target()
     if not t:
-        return False
+        return False, tr("set.push.state.off")
     server, topic, token = t
-    body = {"topic": topic, "title": title, "message": text, "priority": 4, **({"click": PUBLIC_URL} if PUBLIC_URL else {})}
+    body = {"topic": topic, "title": title, "message": text, "priority": prio, **({"click": SET["url"]} if SET["url"] else {})}
     headers = {"Content-Type": "application/json", **({"Authorization": "Bearer " + token} if token else {})}
     try:
-        urllib.request.urlopen(urllib.request.Request(server, json.dumps(body).encode(), headers), timeout=15).read()
-        return True
+        with urllib.request.urlopen(urllib.request.Request(server, json.dumps(body).encode(), headers), timeout=15) as r:
+            return True, f"{r.status} {r.read(400).decode('utf-8', 'replace').strip()}"
+    except urllib.error.HTTPError as err:
+        return False, f"{err.code} {err.read(400).decode('utf-8', 'replace').strip()}"
     except OSError as err:
-        print("ntfy:", err, flush=True)
-        return False
+        return False, str(err)
+
+
+def notify(title, text, prio=4):
+    ok, reply = send_push(title, text, prio)
+    if not ok:
+        print("ntfy:", reply, flush=True)
+    return ok
 
 
 def check_alerts():
@@ -800,7 +922,7 @@ def check_alerts():
         sent = json.loads(f.read_text())
     except (OSError, ValueError):
         sent = {}
-    if not STATE["limits"]:
+    if not STATE["limits"] or quiet_now(time.time()):  # in quiet hours due alerts wait, nothing is marked as sent
         return
     msgs, new = alerts(STATE["limits"], limit_history(), sent, time.time())
     for tag, title, text in msgs:
@@ -844,6 +966,8 @@ def background():
         refresh_limits(540)
         check_alerts()
         refresh_status()
+        if SET["currency"] == "EUR":
+            refresh_fx()
         time.sleep(600)
 
 
@@ -881,6 +1005,7 @@ ICONS = {  # 24 grid, stroke in currentColor
     "/history": '<path d="M5 19v-7M10 19V6M15 19v-4M20 19V9"/>',
     "/details": '<path d="M9 7h11M9 12h11M9 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01"/>',
     "/sessions": '<path d="M20 14.5a2 2 0 0 1-2 2H8.5L4 20V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/>',
+    "/settings": '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     "/projects": '<path d="M3.5 7.5a2 2 0 0 1 2-2h3.8l2 2h7.2a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
 }
 NAV = (("nav.summary", (("/", "nav.overview"), ("/history", "nav.history"))),
@@ -948,10 +1073,13 @@ def until(t):
     return tr("until.day", at=when(t, "daytime"))
 
 
-def meter(u, frac=None, hot=False):
-    mark = (f'<b class="now" style="left:{frac * 100:.1f}%" title="{tr("lim.elapsed", p=pc(frac * 100))}"></b>'
+def meter(u, frac=None, hot=False, left=False):
+    """Bar with a mark where the time stands. left: shows what is left, bar and mark both run down."""
+    pos = 1 - frac if left and frac is not None else frac
+    mark = (f'<b class="now" style="left:{pos * 100:.1f}%" title="{tr("lim.elapsed", p=pc(frac * 100))}"></b>'
             if frac is not None else "")
-    return f'<div class="meter{" hot" if hot else ""}"><i style="width:{min(max(u, 0), 100):.1f}%"></i>{mark}</div>'
+    w = 100 - u if left else u
+    return f'<div class="meter{" hot" if hot else ""}"><i style="width:{min(max(w, 0), 100):.1f}%"></i>{mark}</div>'
 
 
 def api_summary():
@@ -979,6 +1107,7 @@ def limits_card(week_cost):
     if not L:
         return f'<section class="card"><h2>{tr("lim.title")}</h2><p class="hint">{tr("lim.unavailable")}</p></section>'
     hist, left, right = limit_history(), "", ""
+    lv = SET["limit_view"] == "left"
     for key, u, frac, reset, length in windows(L, now):
         start = reset - length if reset else now
         if key == "seven_day":
@@ -991,8 +1120,8 @@ def limits_card(week_cost):
                 txt = tr("lim.week.over", full=when(start + (now - start) * 100 / u, "daytime"), reset=until(reset))
             else:
                 txt = tr("lim.week.lands", fc=pc(fc), frac=pc(frac * 100), reset=until(reset))
-            left = (f'<div class="lbl">{tr("lim.week")}</div><div class="big">{nf(u)}<span>{tr("lim.unit")}</span></div>'
-                    f'{meter(u, frac, u >= 80 or (fc or 0) > 100)}<p class="fc">{txt}</p>')
+            left = (f'<div class="lbl">{tr("lim.week")}</div><div class="big">{nf(100 - u if lv else u)}<span>{tr("lim.unit.left" if lv else "lim.unit")}</span></div>'
+                    f'{meter(u, frac, u >= 80 or (fc or 0) > 100, lv)}<p class="fc">{txt}</p>')
             if u < 100 and reset:
                 # ponytail: even split of what is left; "left today" would need the limit value at midnight
                 left += f'<p class="why">{tr("lim.budget", pct=pc((100 - u) / max((reset - now) / 86400, 1)))}</p>'
@@ -1014,8 +1143,8 @@ def limits_card(week_cost):
         else:
             fc = week_forecast(u, frac)
             txt = (tr("lim.forecast", fc=pc(fc)) + " " if fc else "") + until(reset)
-        right += (f'<div class="lim"><div class="row"><span>{tr("win." + key)}</span><b>{pc(u)}</b></div>'
-                  f'{meter(u, frac, hot)}<div class="why">{txt}</div></div>')
+        right += (f'<div class="lim"><div class="row"><span>{tr("win." + key)}</span><b>{tr("lim.left", p=pc(100 - u)) if lv else pc(u)}</b></div>'
+                  f'{meter(u, frac, hot, lv)}<div class="why">{txt}</div></div>')
     x = L.get("extra_usage") or {}
     if x.get("is_enabled") and x.get("monthly_limit"):
         dp, used = 10 ** (x.get("decimal_places") or 0), x.get("used_credits") or 0
@@ -1044,10 +1173,16 @@ def layout(title, active, p, h1, sub, body, tabs=True, keep=None):
     nav = "".join(f'<div class="grp">{tr(g)}</div>' + "".join(
         f'<a href="{link(href, p=p)}"{" class=on aria-current=page" if href == active else ""}>'
         f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS[href]}</svg>{tr(name)}</a>' for href, name in items) for g, items in NAV)
+    on = active == "/settings"
+    nav += (f'<a class="end{" on" if on else ""}" href="/settings"{" aria-current=page" if on else ""}>'
+            f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS["/settings"]}</svg>{tr("nav.settings")}</a>')
     seg = "".join(chip(tr("period." + k), k == p, link(active, p=k, **(keep or {}))) for k in PERIODS)
     seg = f'<nav class="seg" aria-label="{tr("aria.period")}">{seg}</nav>' if tabs else ""
     foot = (tr("foot.limits", at=hm(STATE["ok"]) if STATE["ok"] else "–") + "<br>"
-            + tr("foot.ntfy.on" if ntfy_target() else "foot.ntfy.off"))
+            + f'<a href="/settings#push">{tr("foot.ntfy.on" if ntfy_target() else "foot.ntfy.off")}</a>')
+    th = SET["theme"]
+    metas = "".join(f'<meta name="theme-color" content="{c}"' + (f' media="(prefers-color-scheme: {m})"' if th == "system" else "") + ">"
+                    for m, c in (("light", "#f7f3ec"), ("dark", "#1b1713")) if th in ("system", m))
     u = urlparse(getattr(_req, "url", "/"))
     q = {k: v[0] for k, v in parse_qs(u.query).items()}
     langs = []
@@ -1059,14 +1194,14 @@ def layout(title, active, p, h1, sub, body, tabs=True, keep=None):
         v = int((STATIC / "style.css").stat().st_mtime)
     except OSError:
         v = 0
-    return f"""<!doctype html><html lang="{lang()}"><head><meta charset="utf-8">
+    theme = f' data-theme="{th}"' if th != "system" else ""
+    return f"""<!doctype html><html lang="{lang()}"{theme}><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>{e(title)}</title>
 <link rel="stylesheet" href="/style.css?v={v}"><link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-180.png"><link rel="manifest" href="/manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Usagecast">
-<meta name="theme-color" content="#f7f3ec" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#1b1713" media="(prefers-color-scheme: dark)"></head>
+{metas}</head>
 <body><div class="app"><aside><a class="brand" href="{link("/", p=p)}"><span class="logo">{LOGO}</span><span>Usagecast</span></a>
 <nav aria-label="{tr("aria.pages")}">{nav}</nav><div class="foot">{foot}</div></aside>
 <main><header class="top"><div><h1>{h1}</h1><p class="sub">{sub}</p></div>{seg}</header>
@@ -1125,7 +1260,7 @@ def data_for(p):
 def warm():
     """Keeps the periods of the overview precomputed, so no page load waits for the analysis."""
     while True:
-        for p in ("w", "30"):
+        for p in dict.fromkeys(("w", "30", SET["period"])):
             try:
                 compute(p)
             except Exception as e:  # noqa: BLE001 - keep warming, the page computes on demand anyway
@@ -1175,7 +1310,8 @@ def page_overview(p):
         f'<li><span class="n">{i}</span><span class="m">{brk(m)}{"" if known_model(m) else " <small>" + tr("ov.estimated") + "</small>"}</span><span class="v">{money(x[2])}</span><b>{pct(x[2], tot)}</b></li>'
         for i, (m, x) in enumerate(models, 1)) + "</ol>"
     logged = tr("ov.logged", p=pc(d["logged"] / (d["n_steps"] or 1) * 100))
-    body = f"""{limits_card(w["total"] if w["week"] else None)}
+    push = "" if ntfy_target() else f'<p class="hint pushoff">{tr("ov.push", url="/settings#push")}</p>'
+    body = f"""{limits_card(w["total"] if w["week"] else None)}{push}
 <div class="kpis">{kpi_html}</div>
 <div class="grid g2">
 <section class="card"><h2>{tr("ov.eats")}</h2>
@@ -1414,6 +1550,103 @@ def page_session(sid, p):
     return layout(f"{title} · Usagecast", "/sessions", p, e(title), sub, body, tabs=False)
 
 
+LAST_PUSH = {}   # result of the last test push, shown on the settings page
+APP_STORE = "https://apps.apple.com/us/app/ntfy/id1625396347"
+COPY_JS = ("var i=document.getElementById('ntfy_topic');i.select();document.execCommand('copy');"
+           "if(navigator.clipboard)navigator.clipboard.writeText(i.value);this.textContent=this.dataset.done")
+
+
+def opts(k, items, off=()):
+    """Radio buttons as a segmented control."""
+    return (f'<span class="opts" role="radiogroup" aria-labelledby="{k}-l">' + "".join(
+        f'<label><input type="radio" name="{k}" value="{v}"{" checked" if v == SET[k] else ""}{" disabled" if v in off else ""}>'
+        f'<span>{t}</span></label>' for v, t in items) + "</span>")
+
+
+def select(k, items, cur):
+    return f'<select id="{k}" name="{k}">' + "".join(
+        f'<option value="{v}"{" selected" if v == cur else ""}>{t}</option>' for v, t in items) + "</select>"
+
+
+def check(k):
+    return f'<input type="checkbox" id="{k}" name="{k}"{" checked" if SET[k] else ""}>'
+
+
+def field(k, name, ctl, why=""):
+    """One settings row: name and explanation left, control right. k: id of the control."""
+    why = '<div class="why">' + why + "</div>" if why else ""   # a div: the push steps hold a list
+    return f'<div class="field"><div><label for="{k}" id="{k}-l">{name}</label>{why}</div><div class="ctl">{ctl}</div></div>'
+
+
+def card(k, title, inner, hint=""):
+    hint = '<p class="hint">' + hint + "</p>" if hint else ""
+    return f'<section class="card" id="{k}"><h2>{title}</h2>{hint}{inner}</section>'
+
+
+def page_settings(q):
+    s, done, T = SET, (q.get("done") or [""])[0], lambda k: tr("set." + k)
+    note = ""
+    if done == "test" and time.time() - LAST_PUSH.get("at", 0) < 600:
+        note = tr("set.test.ok" if LAST_PUSH["ok"] else "set.test.fail", reply=f'<code>{e(LAST_PUSH["reply"])}</code>')
+    elif done in ("save", "setup", "newtopic", "useurl"):
+        note = T("done." + done)
+    note = f'<p class="note" role="status">{note}</p>' if note else ""
+    top, push_note = (note, "") if done == "save" else ("", note)
+    if FX.get("rate"):
+        fx = tr("set.fx", date=when(datetime.fromisoformat(FX["date"]).timestamp(), "day"), rate=nf(FX["rate"], 4))
+    else:
+        fx = T("fx.none" if s["currency"] == "EUR" else "fx.usd")
+    look = (field("theme", T("theme"), opts("theme", [(v, T("theme." + v)) for v in CHOICES["theme"]]))
+            + field("lang", T("lang"), select("lang", [(c, LOC[c]["lang.name"]) for c in LOC], lang()), T("lang.why"))
+            + field("currency", T("currency"), select("currency", [(c, T("currency." + c)) for c in CHOICES["currency"]], s["currency"]), fx)
+            + field("numbers", T("numbers"), opts("numbers", [(v, T("numbers." + v)) for v in CHOICES["numbers"]]))
+            + field("period", T("period"), select("period", [(k, tr("period." + k)) for k in PERIODS], s["period"]), T("period.why")))
+    limits = field("limit_view", T("view"), opts("limit_view", [(v, T("view." + v)) for v in CHOICES["limit_view"]]), T("view.why"))
+    lo, hi = RANGES["five_min"]
+    five = (f'{check("alert_five")}<input type="number" id="five_min" name="five_min" value="{s["five_min"]}" min="{lo}" max="{hi}"'
+            f' inputmode="numeric" aria-label="{T("a.five.min")}"><span class="why">{T("min")}</span>')
+    quiet = (f'{check("quiet")}<input type="time" id="quiet_from" name="quiet_from" value="{s["quiet_from"]}" aria-label="{T("quiet.from")}">'
+             f'<span class="why">–</span><input type="time" id="quiet_to" name="quiet_to" value="{s["quiet_to"]}" aria-label="{T("quiet.to")}">')
+    alerts_ = (field("alert_five", T("a.five"), five, T("a.five.why")) + field("alert_week", T("a.week"), check("alert_week"), T("a.week.why"))
+               + field("alert_extra", T("a.extra"), check("alert_extra"), T("a.extra.why")) + field("quiet", T("quiet"), quiet, T("quiet.why")))
+    host, own = urlparse(s["ntfy_server"]).netloc, s["ntfy_server"] != "https://ntfy.sh"
+    target = ntfy_target()
+    state = (T("push.state.off") if not target else T("push.state.hermes") if s["push"] == "hermes"
+             else tr("set.push.state.own", server=e(host)))
+    push = f'<p class="state"><strong>{state}</strong></p>{push_note}'
+    if not s["ntfy_topic"]:
+        push += field("setup", T("setup"), f'<button class="btn primary" id="setup" name="action" value="setup">{T("setup.btn")}</button>', T("setup.why"))
+    else:
+        android = f'ntfy://{host}/{s["ntfy_topic"]}' + ("" if s["ntfy_server"].startswith("https:") else "?secure=false")
+        steps = "".join(f"<li>{x}</li>" for x in (tr("set.ios.1", url=APP_STORE), T("ios.2"), T("ios.3")))
+        ios = f'{T("ios")}<ol class="steps">{steps}</ol>' + (tr("set.ios.own", server=e(s["ntfy_server"])) if own else "")
+        push += (field("ntfy_topic", T("topic"), f'<input id="ntfy_topic" name="ntfy_topic" value="{e(s["ntfy_topic"])}" class="mono"'
+                       f' spellcheck="false" autocomplete="off" autocapitalize="off"><button type="button" class="btn" data-done="{T("copied")}"'
+                       f' onclick="{COPY_JS}">{T("copy")}</button>', T("topic.why"))
+                 + field("android", T("subscribe"), f'<a class="btn" id="android" href="{e(android)}">{T("android")}</a>', ios)
+                 + field("test", T("test"), f'<button class="btn" id="test" name="action" value="test">{T("test.btn")}</button>', T("test.why"))
+                 + field("newtopic", T("newtopic"), f'<button class="btn" id="newtopic" name="action" value="newtopic">{T("newtopic.btn")}</button>',
+                         T("newtopic.why")))
+    hermes_ok = hermes_ntfy() is not None
+    push += field("push", T("via"), opts("push", [(v, T("via." + v)) for v in CHOICES["push"]], () if hermes_ok else ("hermes",)),
+                  T("via.why" if hermes_ok else "via.nohermes"))
+    token = (f'<input type="password" id="ntfy_token" name="ntfy_token" placeholder="{T("token.saved") if s["ntfy_token"] else ""}"'
+             f' autocomplete="new-password">' + (f'<label class="why"><input type="checkbox" name="token_clear"> {T("token.clear")}</label>'
+                                                 if s["ntfy_token"] else ""))
+    push += (f'<details class="adv"{" open" if own else ""}><summary>{T("server")}</summary>'
+             + field("ntfy_server", T("server.url"), f'<input type="url" id="ntfy_server" name="ntfy_server" value="{e(s["ntfy_server"])}" class="wide">',
+                     T("server.why"))
+             + field("ntfy_token", T("token"), token, T("token.why")) + "</details>")
+    push += field("url", T("url"), f'<input type="url" id="url" name="url" value="{e(s["url"])}" class="wide" placeholder="https://">'
+                  f'<button class="btn" name="action" value="useurl">{T("useurl")}</button>', T("url.why"))
+    body = (f'{top}<form method="post" action="/settings" class="set">'
+            '<button class="sr" name="action" value="save" tabindex="-1" aria-hidden="true"></button>'  # Enter in a field = save
+            + card("look", T("look"), look) + card("limits", T("limits"), limits) + card("alerts", T("alerts"), alerts_, T("alerts.hint"))
+            + card("push", T("push"), push, T("push.hint"))
+            + f'<div class="save"><button class="btn primary" name="action" value="save">{T("save")}</button></div></form>')
+    return layout(T("h1") + " · Usagecast", "/settings", s["period"], T("h1"), T("sub"), body, tabs=False)
+
+
 class Handler(BaseHTTPRequestHandler):
     cookie = None
 
@@ -1433,8 +1666,8 @@ class Handler(BaseHTTPRequestHandler):
         wanted = (q.get("lang") or [""])[0]
         _req.lang, _req.url = pick_lang(wanted, self.headers), self.path
         self.cookie = f"lang={wanted}; Path=/; Max-Age=31536000; SameSite=Lax" if wanted in LOC else None
-        p = q.get("p", [DEFAULT_P])[0]
-        p = p if p in PERIODS else DEFAULT_P
+        p = q.get("p", [SET["period"]])[0]
+        p = p if p in PERIODS else SET["period"]
         path = ALIASES.get(u.path, u.path)
         name = path.lstrip("/")
         if name in STATIC_FILES:
@@ -1450,6 +1683,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = page_sessions(p, q)
             elif path.startswith("/s/"):
                 body = page_session(unquote(path[3:]), p)
+            elif path == "/settings":
+                body = page_settings(q)
             elif path == "/api/summary":
                 return self.send(api_summary().encode(), "application/json")
             elif path == "/health":
@@ -1462,6 +1697,35 @@ class Handler(BaseHTTPRequestHandler):
         if body is None:
             return self.send_error(404)
         self.send(body.encode(), "text/html; charset=utf-8")
+
+    def do_POST(self):
+        """Only /settings: saves the form, then runs the button's action (set up, new topic, test, use this address)."""
+        _req.lang, _req.url = pick_lang("", self.headers), self.path
+        n = self.headers.get("Content-Length", "0")
+        if urlparse(self.path).path != "/settings":
+            return self.send_error(404)
+        if not same_origin(self.headers) or not n.isdigit() or int(n) > 65536:
+            return self.send_error(403)
+        form = {k: v[-1] for k, v in parse_qs(self.rfile.read(int(n)).decode("utf-8", "replace"), keep_blank_values=True).items()}
+        action = form.get("action", "save")
+        s = clean(form, SET)
+        if action in ("setup", "newtopic"):
+            s["ntfy_topic"] = new_topic()
+            s["push"] = "own" if action == "setup" else s["push"]
+        elif action == "useurl" and re.fullmatch(URL_RX, self.headers.get("Origin") or ""):
+            s["url"] = self.headers["Origin"].rstrip("/")
+        save_settings(s)
+        _req.lang = s["lang"]
+        if s["currency"] == "EUR":
+            refresh_fx()
+        if action == "test":
+            ok, reply = send_push(tr("alert.test"), tr("alert.test.text"), 3)
+            LAST_PUSH.update(at=time.time(), ok=ok, reply=reply)
+        self.send_response(303)
+        self.send_header("Location", f"/settings?done={quote(action)}" + ("" if action == "save" else "#push"))
+        self.send_header("Set-Cookie", f"lang={s['lang']}; Path=/; Max-Age=31536000; SameSite=Lax")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def log_message(self, *a):
         pass
@@ -1497,6 +1761,7 @@ def test_db(base=0.0):
 
 def selftest():
     global HERMES, DATA
+    SET.clear(); SET.update(DEFAULTS); FX.clear()   # the installed settings must not change the expected formats
     # Locales: same keys and placeholders everywhere, every literal key used in the code exists
     src = Path(__file__).read_text("utf-8")
     used = set(re.findall(r'tr\(\s*"([\w.:-]+)"(?=\s*[,)])', src)) | set(re.findall(r'"(th\.[\w]+)"', src))  # "x." + k: below
@@ -1519,6 +1784,9 @@ def selftest():
     _req.lang = "en"
     assert (money(1234.5), pct(1, 8), num(1_234_567), num(5400), money(0.001)) == ("$1,234.50", "12.5%", "1.2M", "5K", "< $0.01")
     assert when(datetime(2026, 10, 8, 9, 5).timestamp(), "daytime") == "Thu Oct 8, 09:05"
+    SET.update(currency="EUR", numbers="full"); FX["rate"] = 1.25
+    assert (money(10), num(1_234_567)) == ("€8.00", "1,234,567")
+    SET.update(currency="USD", numbers="compact"); FX.clear()
     # Config, markers, prices
     cfg = ("model:\n  default: m\n  provider: anthropic\nmemory:\n\n  provider: memory_tencentdb\n"
            "plugins:\n  enabled:\n    - ponytail\n    - 'superpowers'\n    - platforms/ntfy\n  disabled: []\n")
@@ -1579,6 +1847,21 @@ def selftest():
     msgs, st = alerts(L, hist, sent, now + 60)
     assert [t.split(":")[0] for t, _, _ in msgs] == ["extra"] and st["extra_used"] == 100  # state only after sending
     assert alerts(L, hist, {**st, msgs[0][0]: now}, now + 120) == ([], {**st, msgs[0][0]: now, "extra_used": 150})
+    kinds = lambda s: [t.split(":")[0] for t, _, _ in alerts(L, hist, {}, now, {**SET, **s})[0]]
+    assert kinds({"alert_five": False}) == kinds({"five_min": 20}) == ["seven_day"] and kinds({"alert_week": False}) == ["five_hour"]
+    # Settings: a missing checkbox is off, invalid input keeps the old value, the token stays unless removed
+    s = clean({"theme": "dark", "currency": "XXX", "five_min": "3", "ntfy_topic": "bad topic", "quiet_from": "25:00",
+               "url": "javascript:x", "ntfy_token": ""}, {**SET, "ntfy_token": "tk"})
+    assert (s["theme"], s["currency"], s["five_min"], s["ntfy_topic"], s["quiet_from"], s["url"], s["ntfy_token"], s["alert_five"]) == \
+        ("dark", SET["currency"], 5, SET["ntfy_topic"], SET["quiet_from"], SET["url"], "tk", False), s
+    assert clean({"token_clear": "1", "ntfy_token": "x"}, {**SET, "ntfy_token": "tk"})["ntfy_token"] == ""
+    assert clean({"url": ""}, {**SET, "url": "https://a"})["url"] == "" and clean({"url": "https://a.b:8443/"}, SET)["url"] == "https://a.b:8443"
+    qs, at = {**SET, "quiet": True, "quiet_from": "22:00", "quiet_to": "07:00"}, lambda h, m: datetime(2026, 10, 8, h, m).timestamp()
+    assert quiet_now(at(23, 0), qs) and quiet_now(at(6, 59), qs) and not quiet_now(at(7, 0), qs) and not quiet_now(at(23, 0), SET)
+    assert quiet_now(at(13, 0), {**qs, "quiet_from": "12:00", "quiet_to": "14:00"}) and not quiet_now(at(15, 0), {**qs, "quiet_from": "12:00", "quiet_to": "14:00"})
+    assert same_origin({"Sec-Fetch-Site": "same-origin"}) and not same_origin({"Sec-Fetch-Site": "cross-site", "Origin": "http://h", "Host": "h"})
+    assert same_origin({"Origin": "http://h:1", "Host": "h:1"}) and not same_origin({"Origin": "http://evil", "Host": "h:1"}) and not same_origin({"Host": "h"})
+    assert re.fullmatch(r"usagecast-[0-9a-f]{16}", new_topic())
     # Every page renders in every language without leftover locale keys
     with tempfile.TemporaryDirectory() as tmp:
         HERMES, DATA = Path(tmp), Path(tmp) / "data"
@@ -1586,14 +1869,32 @@ def selftest():
         db.backup(disk := sqlite3.connect(Path(tmp) / "state.db"))
         disk.close()
         STATE["at"] = time.time()  # no limit fetch during the test
-        leftover = re.compile(r"\b(?:th|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
+        save_settings({**SET, "currency": "EUR"})
+        assert load_settings()["currency"] == "EUR" and (DATA / "settings.json").stat().st_mode & 0o777 == 0o600
+        SET["currency"] = "USD"
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def post(origin):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}/settings", b"theme=dark&action=save", {"Origin": origin})
+            try:
+                return urllib.request.urlopen(req, timeout=30).status
+            except urllib.error.HTTPError as err:
+                return err.code
+        assert post("http://evil.example") == 403 and SET["theme"] == "system"
+        assert post(f"http://127.0.0.1:{srv.server_port}") == 200 and load_settings()["theme"] == "dark"   # 303 to the page
+        srv.shutdown()
+        LAST_PUSH.update(at=time.time(), ok=False, reply="<x>")
+        leftover = re.compile(r"\b(?:th|set|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
+            SET["ntfy_topic"] = "usagecast-test" if code != "en" else ""   # English: not set up yet, the others: subscribe steps
             for page in [*(f(p) for f in (page_overview, page_history, page_details, page_projects) for p in PERIODS),
                          page_sessions("7", {}), page_sessions("7", {"view": ["cron"]}), page_sessions("7", {"proj": ["shop"]}),
-                         page_session("s", "7")]:
+                         page_session("s", "7"), page_settings({"done": ["save"]}), page_settings({"done": ["test"]})]:
                 text = re.sub(r"<[^>]+>", " ", page)
                 assert not leftover.search(text) and "{" not in text, (code, leftover.search(text), text[:300])
+    assert "&lt;x&gt;" in page_settings({"done": ["test"]}) and 'data-theme="dark"' in page_settings({})
     print("selftest ok")
 
 
