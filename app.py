@@ -974,6 +974,9 @@ def limits_card(week_cost):
                 txt = tr("lim.week.lands", fc=pc(fc), frac=pc(frac * 100), reset=until(reset))
             left = (f'<div class="lbl">{tr("lim.week")}</div><div class="big">{nf(u)}<span>{tr("lim.unit")}</span></div>'
                     f'{meter(u, frac, u >= 80 or (fc or 0) > 100)}<p class="fc">{txt}</p>')
+            if u < 100 and reset:
+                # ponytail: even split of what is left; "left today" would need the limit value at midnight
+                left += f'<p class="why">{tr("lim.budget", pct=pc((100 - u) / max((reset - now) / 86400, 1)))}</p>'
             if week_cost is not None:
                 left += f'<p class="why">{tr("lim.weekcost", cost=money(week_cost))}</p>'
             continue

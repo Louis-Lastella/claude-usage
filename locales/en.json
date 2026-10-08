@@ -111,6 +111,7 @@
   "lim.week.over": "At the current pace the week is <strong>full around {full}</strong>. {reset}",
   "lim.week.lands": "At the current pace the week ends at <strong>about {fc}</strong>. {frac} of the time has passed. {reset}",
   "lim.weekcost": "Hermes used {cost} of API value in this limit week. The limit also counts everything you do with Claude outside of Hermes.",
+  "lim.budget": "Daily budget: about <strong>{pct} per day</strong> until the reset.",
   "lim.five.full_at": "At the pace of the last hour, full around {full}. {reset}",
   "lim.five.enough": "Lasts until the reset at {reset}, then about {at}.",
   "lim.forecast": "Forecast about {fc}.",

@@ -111,6 +111,7 @@
   "lim.week.over": "Beim jetzigen Tempo ist die Woche <strong>ca. {full} voll</strong>. {reset}",
   "lim.week.lands": "Beim jetzigen Tempo landet die Woche bei <strong>ca. {fc}</strong>. {frac} der Zeit sind um. {reset}",
   "lim.weekcost": "Hermes hat in dieser Limit-Woche {cost} API-Gegenwert verbraucht. Das Limit zählt auch alles, was du außerhalb von Hermes mit Claude machst.",
+  "lim.budget": "Tagesbudget: etwa <strong>{pct} pro Tag</strong> bis zum Reset.",
   "lim.five.full_at": "Beim Tempo der letzten Stunde voll ca. {full}. {reset}",
   "lim.five.enough": "Reicht bis zum Reset um {reset}, dann ca. {at}.",
   "lim.forecast": "Prognose ca. {fc}.",
