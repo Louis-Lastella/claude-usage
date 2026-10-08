@@ -44,6 +44,16 @@ h2{font:500 19px/1.3 var(--serif);margin:0 0 4px}
 .seg a:hover{color:var(--ink)}
 .seg a.on{background:var(--ink);color:var(--bg)}
 
+.periods{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;max-width:100%}
+details.range{position:relative}
+details.range summary{list-style:none;cursor:pointer;padding:9px 15px;border-radius:999px;background:var(--card);box-shadow:0 0 0 1px var(--line);color:var(--mute);font-size:13.5px;white-space:nowrap}
+details.range summary::-webkit-details-marker{display:none}
+details.range summary:hover{color:var(--ink)}
+details.range.on summary{background:var(--ink);color:var(--bg);box-shadow:none}
+details.range form{position:absolute;right:0;top:calc(100% + 6px);z-index:6;display:flex;flex-wrap:wrap;gap:8px;align-items:center;width:max-content;max-width:calc(100vw - 32px);padding:12px;border-radius:14px;background:var(--card);box-shadow:0 0 0 1px var(--line),0 10px 28px rgba(0,0,0,.1)}
+details.range input{font:inherit;font-size:14px;color:var(--ink);background:var(--bg);border:0;box-shadow:0 0 0 1px var(--line);border-radius:10px;padding:6px 9px}
+details.range span{color:var(--faint)}
+
 /* Cards */
 .card{background:var(--card);border-radius:18px;box-shadow:0 0 0 1px var(--line);padding:20px 22px}
 .card+.card,.card+.sec{margin-top:16px}
@@ -201,6 +211,7 @@ aside>nav{flex:none;flex-direction:row}aside nav a.end{margin-top:0}
 aside nav a{white-space:nowrap;padding:7px 10px}
 main{padding:22px 16px 70px}
 .top{flex-direction:column;align-items:stretch}
+.periods{justify-content:flex-start}details.range form{left:0;right:auto}
 h1{font-size:25px}
 .g2,.hero{grid-template-columns:minmax(0,1fr)}
 .hero{padding:20px}

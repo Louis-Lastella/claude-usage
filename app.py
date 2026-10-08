@@ -460,7 +460,7 @@ def floor(t, hourly):
     return datetime.fromtimestamp(t).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
-def analyze(c, since, snap, ttl, sid=None, logs=None):
+def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
     """Splits the real costs since `since` (or of one session) over components, origin and time.
     Invariant: sum(comp) == real cost of the calls in the period. Contains only ids, no display text."""
     logs = log_index() if logs is None else logs
@@ -483,7 +483,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None):
             timestamp, reasoning from messages where session_id in ({q}) order by session_id, id""", ids):
         msgs[r[0]].append(r[1:])
 
-    hourly = sid is None and since > time.time() - 2 * 86400
+    hourly = sid is None and min(until, time.time()) - since < 2 * 86400
     comp, where = defaultdict(float), defaultdict(float)
     hours = defaultdict(lambda: defaultdict(float))       # hour start -> component -> $
     hsteps, hsess = defaultdict(int), defaultdict(set)    # hour start -> steps, sessions
@@ -504,7 +504,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None):
             hsess[h].add(s)
 
         for m, task, n, i, r, w, o, seen in (x for x in rows if x[1] != "chat"):
-            if seen > since:
+            if since < seen <= until:
                 cost = sum(row_cost(m, i, r, w, o, ttl))
                 put("task:" + task, cost, seen)
                 models[m][0] += n; models[m][1] += i + r + w + o; models[m][2] += cost
@@ -514,7 +514,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None):
             pass
         elif not msgs.get(s):
             seen = max(x[7] for x in chat)
-            if seen > since:
+            if since < seen <= until:
                 cost = sum(sum(row_cost(m, i, r, w, o, ttl)) for m, _, _, i, r, w, o, _ in chat)
                 put("other", cost, seen)
                 for m, _, n, i, r, w, o, _ in chat:
@@ -556,7 +556,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None):
             fo = co / SO if SO else 0.0
             p_cost = 0.0
             for (t, gap, before, now, out, keys), (hit, new, lost, kind, logged) in zip(calls, splits):
-                if t <= since:
+                if t <= since or t > until:
                     continue
                 parts = defaultdict(float)
                 for k, v in hit.items():
@@ -589,7 +589,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None):
                 if sid:
                     steps.append((t, ctx_tok, cost, lost * fw, kind if lost > 1e-9 else "", keys))
             for t, k, n in sizes:
-                if t > since:
+                if since < t <= until:
                     sizes_acc[k][0] += 1; sizes_acc[k][1] += n
             f = p_cost / chat_cost if chat_cost else 0.0  # share of the session inside the period
             for m, _, n, i, r, w, o, _ in chat:
@@ -612,7 +612,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None):
         ttl_save, ttl_alt = tot["writes"] * 0.375 - tot["extra"] * 0.625, 300
     return dict(comp=comp, where=where, models=models, hours=hours, hsteps=hsteps, hsess=hsess, sess=sess, steps=steps,
                 uses=uses, sizes=sizes_acc, total=sum(comp.values()), ttl=ttl, ttl_alt=ttl_alt, ttl_save=ttl_save,
-                since=since, hourly=hourly, **tot)
+                since=since, until=until, hourly=hourly, **tot)
 
 
 # ---------- Projects ----------
@@ -1308,7 +1308,14 @@ def layout(title, active, p, h1, sub, body, tabs=True, keep=None):
     nav += (f'<a class="end{" on" if on else ""}" href="/settings"{" aria-current=page" if on else ""}>'
             f'<svg viewBox="0 0 24 24" aria-hidden="true">{ICONS["/settings"]}</svg>{tr("nav.settings")}</a>')
     seg = "".join(chip(tr("period." + k), k == p, link(active, p=k, **(keep or {}))) for k in PERIODS)
-    seg = f'<nav class="seg" aria-label="{tr("aria.period")}">{seg}</nav>' if tabs else ""
+    a, b = custom(p) or (time.time() - 6 * 86400, time.time() + 1)
+    iso = lambda t: datetime.fromtimestamp(t).date().isoformat()
+    today, hidden = iso(time.time()), "".join(f'<input type="hidden" name="{e(k)}" value="{e(v)}">' for k, v in (keep or {}).items())
+    rng = (f'<details class="range{" on" if custom(p) else ""}"><summary>{e(pname(p)) if custom(p) else tr("range.custom")}</summary>'
+           f'<form method="get" action="{active}">{hidden}<input type="date" name="from" value="{iso(a)}" max="{today}" aria-label="{tr("range.from")}" required>'
+           f'<span>–</span><input type="date" name="to" value="{iso(b - 3600)}" max="{today}" aria-label="{tr("range.to")}" required>'
+           f'<button class="btn primary">{tr("range.go")}</button></form></details>')
+    seg = f'<div class="periods"><nav class="seg" aria-label="{tr("aria.period")}">{seg}</nav>{rng}</div>' if tabs else ""
     foot = (tr("foot.limits", at=hm(STATE["ok"]) if STATE["ok"] else "–") + "<br>"
             + f'<a href="/settings#push">{tr("foot.ntfy.on" if ntfy_target() else "foot.ntfy.off")}</a>')
     th = SET["theme"]
@@ -1347,6 +1354,26 @@ def connect():
     return sqlite3.connect(f"file:{HERMES / 'state.db'}?mode=ro", uri=True, timeout=15)
 
 
+RANGE_RX = re.compile(r"(\d{4}-\d\d-\d\d)\.\.(\d{4}-\d\d-\d\d)")
+
+
+def custom(p):
+    """(start, end) of a custom period like "2026-10-01..2026-10-07" (both days included), otherwise None."""
+    try:
+        a, b = sorted(datetime.fromisoformat(x) for x in RANGE_RX.fullmatch(p or "").groups())
+    except (AttributeError, ValueError):
+        return None
+    return a.timestamp(), (b + timedelta(days=1)).timestamp()
+
+
+def pname(p):
+    """Name of a period: "Limit week", "7 days", or the dates of a custom one."""
+    if p in PERIODS:
+        return tr("period." + p)
+    a, b = custom(p)
+    return when(a, "day") if b - a <= 86400 + 3600 else f"{when(a, 'day')} – {when(b - 3600, 'day')}"
+
+
 def since_for(p):
     """(start of the period, whether it really is the limit week)."""
     if p == "w":
@@ -1355,6 +1382,8 @@ def since_for(p):
             return datetime.fromisoformat(STATE["limits"]["seven_day"]["resets_at"]).timestamp() - 7 * 86400, True
         except (KeyError, TypeError, ValueError):
             pass
+    if custom(p):
+        return custom(p)[0], False
     return time.time() - PERIODS[p] * 86400, False
 
 
@@ -1364,7 +1393,7 @@ REFRESHING = set()
 def compute(p):
     try:
         since, week = since_for(p)
-        d = analyze(connect(), since, load_snap(), cache_ttl())
+        d = analyze(connect(), since, load_snap(), cache_ttl(), until=(custom(p) or (0, math.inf))[1])
         d.update(week=week, p=p, at=time.time())
         if p == "30":
             r = limit_split(limit_history(30), d["hours"], cc_calls(since), since) or {}
@@ -1376,6 +1405,8 @@ def compute(p):
             RATE.clear()
             RATE.update(k=k, hours=r.get("hours", 0))
         with LOCK:
+            for k in [k for k in CACHE if custom(k) and k != p]:
+                CACHE.pop(k)   # ponytail: keep only the latest custom period in memory
             CACHE[p] = (time.time(), d)
         return d
     finally:
@@ -1409,6 +1440,8 @@ def warm():
 
 
 def period_text(d):
+    if custom(d["p"]):
+        return pname(d["p"])
     if d["week"]:
         return tr("since.w", at=when(d["since"], "daytime"))
     return tr("since." + (d["p"] if d["p"] in ("1", "30") else "7"))
@@ -1437,7 +1470,7 @@ def page_overview(p):
     tot, ttl, now = d["total"] or 1, d["ttl"], time.time()
     active = {floor(h, False) for h, v in d30["hours"].items() if sum(v.values()) > 0}
     sums = {"1": window_sum(d30, now - 86400), "7": window_sum(d30, now - 7 * 86400), "30": d30["total"]}
-    kpis = [("main", tr("period." + p), money(d["total"]), tr("kpi.main.sub", tokens=num(d["tokens"]), steps=cnt(d["calls"])))]
+    kpis = [("main", pname(p), money(d["total"]), tr("kpi.main.sub", tokens=num(d["tokens"]), steps=cnt(d["calls"])))]
     kpis += [("", tr("period." + k), money(sums[k]), tr("kpi.api")) for k in [k for k in ("7", "30", "1") if k != p][:2]]
     kpis += [("", tr("kpi.avg"), money(d30["total"] / max(len(active), 1)), tr("kpi.avg.sub", n=len(active))),
              ("", tr("kpi.sessions"), cnt(len(d["sess"])), tr("kpi.sessions.sub"))]
@@ -1477,7 +1510,7 @@ def stacked(d):
         for k, v in comp.items():
             cols[b][group(k) if group(k) in top else "rest"] += v
     keys, t, step = [], floor(d["since"], hourly), 3600 if hourly else 86400
-    while t <= time.time():
+    while t <= min(time.time(), d["until"] - 1):
         keys.append(t)
         t = floor(t + step + (0 if hourly else 7200), hourly)  # +2 h survives daylight saving changes
     if not keys or not d["total"]:
@@ -1645,7 +1678,7 @@ def cron_jobs(d, p):
         sched = {j.get("name"): j.get("schedule_display") or (j.get("schedule") or {}).get("display") or "" for j in jobs}
     except (OSError, ValueError, AttributeError):
         sched = {}
-    days = max((time.time() - d["since"]) / 86400, 1 / 24)
+    days = max((min(time.time(), d["until"]) - d["since"]) / 86400, 1 / 24)
     g = defaultdict(lambda: [0, 0.0])
     for x in d["sess"].values():
         if x["origin"].startswith("cron:"):
@@ -1864,8 +1897,10 @@ class Handler(BaseHTTPRequestHandler):
         wanted = (q.get("lang") or [""])[0]
         _req.lang, _req.url = pick_lang(wanted, self.headers), self.path
         self.cookie = f"lang={wanted}; Path=/; Max-Age=31536000; SameSite=Lax" if wanted in LOC else None
+        if q.get("from") and q.get("to"):
+            q["p"] = [f'{q["from"][0]}..{q["to"][0]}']   # the custom-range form
         p = q.get("p", [SET["period"]])[0]
-        p = p if p in PERIODS else SET["period"]
+        p = p if p in PERIODS or custom(p) else SET["period"]
         path = ALIASES.get(u.path, u.path)
         name = path.lstrip("/")
         if name in STATIC_FILES:
@@ -2023,6 +2058,10 @@ def selftest():
     assert d["comp"]["rebuild"] > 0 and d["comp"]["task:background_review"] > 0 and d["comp"]["tool:terminal"] > 0
     assert d["where"].keys() == {"telegram", "cron:Daily report"} and d["sess"]["s"]["project"] == "shop"
     late = analyze(db, 999, snap, 300, logs={})    # the period cuts by call time
+    early = analyze(db, -1, snap, 300, logs={}, until=999)
+    assert abs(early["total"] + late["total"] - d["total"]) < 1e-12 and early["total"] > 0     # until cuts the same way
+    a, b = custom("2026-10-07..2026-10-01")
+    assert (a, b) == (datetime(2026, 10, 1).timestamp(), datetime(2026, 10, 8).timestamp()) and custom("2026-13-01..2026-10-01") is None and not custom("7")
     assert 0 < late["total"] < d["total"] and late["comp"]["rebuild"] > 0 and "tool:terminal" not in late["uses"]
     logged = analyze(db, -1, snap, 300, logs={"s": ([1.0, 3.0, 1001.0], [(5000, 0), (6000, 0), (6100, 0)])})
     assert logged["comp"]["break"] > 0 and abs(logged["total"] - real) < 1e-12 and logged["logged"] == 3  # break without pause
@@ -2125,7 +2164,8 @@ def selftest():
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
             SET["ntfy_topic"] = "usagecast-test" if code != "en" else ""   # English: not set up yet, the others: subscribe steps
-            for page in [*(f(p) for f in (page_overview, page_history, page_details, page_projects) for p in PERIODS),
+            cp = f"{datetime.now().date() - timedelta(days=1)}..{datetime.now().date()}"
+            for page in [*(f(p) for f in (page_overview, page_history, page_details, page_projects) for p in [*PERIODS, cp]),
                          page_sessions("7", {}), page_sessions("7", {"view": ["cron"]}), page_sessions("7", {"proj": ["shop"]}),
                          page_session("s", "7"), page_settings({"done": ["save"]}), page_settings({"done": ["test"]})]:
                 text = re.sub(r"<[^>]+>", " ", page)
