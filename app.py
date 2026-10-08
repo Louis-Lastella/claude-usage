@@ -1375,7 +1375,8 @@ def layout(title, active, p, h1, sub, body, tabs=True, keep=None):
         v = 0
     theme = f' data-theme="{th}"' if th != "system" else ""
     return f"""<!doctype html><html lang="{lang()}"{theme}><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>{e(title)}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><title>{e(title)}</title>
+<script>for(const t of["gesturestart","gesturechange"])addEventListener(t,e=>e.preventDefault())</script>
 <link rel="stylesheet" href="/style.css?v={v}"><link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-180.png"><link rel="manifest" href="/manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
