@@ -143,6 +143,9 @@ svg.chart g:hover rect:not(.hit){opacity:.8}
 .heat .hx{grid-column:span 6;align-self:start;margin-top:5px}
 .h0{background:var(--h0)}.h1{background:var(--h1)}.h2{background:var(--h2)}.h3{background:var(--h3)}.h4{background:var(--h4)}
 .heat i.h1{background:var(--h1)}.heat i.h2{background:var(--h2)}.heat i.h3{background:var(--h3)}.heat i.h4{background:var(--h4)}
+.cal{display:grid;grid-template-rows:14px repeat(7,auto);grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:3px;margin-top:14px}
+.cal span{font-size:11px;line-height:14px;color:var(--faint);white-space:nowrap}
+.cal i{aspect-ratio:1;border-radius:2px}
 .scale{display:flex;align-items:center;gap:3px;justify-content:flex-end;font-size:11.5px;color:var(--faint);margin:10px 0 4px}
 .scale i{width:11px;height:11px;border-radius:3px}
 .scale i:first-child{margin-left:6px}.scale i:last-child{margin-right:6px}
@@ -208,6 +211,7 @@ table{font-size:13.5px}th{white-space:normal}
 td:first-child,th:first-child{min-width:0}
 td:first-child,td.l{overflow-wrap:anywhere}
 th,td{padding:9px 9px}.o{display:none}
+.cal>:nth-child(-n+216){display:none}.cal{gap:2px}
 .heat{gap:2px;grid-template-columns:20px repeat(24,minmax(0,1fr))}.heat i{height:auto;aspect-ratio:1;border-radius:2px}
 .search input{width:100%}.search{flex:1 1 100%}
 }

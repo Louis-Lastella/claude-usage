@@ -218,6 +218,10 @@
   "heat.cell": "{wd} {h}–{h2} Uhr: {v}",
   "heat.less": "weniger",
   "heat.more": "mehr",
+  "cal.title": "Das letzte Jahr",
+  "cal.hint": "API-Gegenwert pro Tag. Jede Spalte ist eine Woche, oben Montag.",
+  "cal.cell": "{day}: {v}",
+  "cal.sum": "An {n} von {total} Tagen aktiv. Stärkster Tag: {day} mit {v}.",
   "heat.peak": "Am meisten fiel {wd} zwischen {h} und {h2} Uhr an ({v}). Teuerster Wochentag: {bwd} mit {bv}.",
 
   "det.tools": "Tools",

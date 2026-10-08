@@ -12,7 +12,7 @@ moment: tools, skills, plugins, system prompt parts, thinking, cache rebuilds af
 """
 import bisect, glob, gzip, html, json, math, os, re, secrets, sqlite3, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
@@ -1528,6 +1528,56 @@ def heatmap(d):
             f'<p class="hint">{tr("heat.peak", wd=wds[pw], h=ph, h2=ph + 1, v=money(pv), bwd=wds[bw], bv=money(wd_tot[bw]))}</p>')
 
 
+CAL = {}   # day_costs() cache
+
+
+def day_costs():
+    """{local date: $} for the last year, cached 10 min. Cheap on purpose: each session's API cost is spread over
+    its days by message count (sessions without messages go to their start day)."""
+    # ponytail: spread by messages, not by call time; analyze() over a year would take far too long
+    if time.time() - CAL.get("at", 0) < 600:
+        return CAL["days"]
+    since, ttl, c = time.time() - 371 * 86400, cache_ttl(), connect()
+    cost, spread, days = defaultdict(float), defaultdict(dict), defaultdict(float)
+    for sid, model, i, r, w, o in c.execute("""select session_id, model, input_tokens, cache_read_tokens, cache_write_tokens,
+            output_tokens from session_model_usage where model like 'claude%'"""):
+        cost[sid] += sum(row_cost(model, i, r, w, o, ttl))
+    for sid, day, n in c.execute("""select session_id, date(timestamp, 'unixepoch', 'localtime'), count(*) from messages
+            where timestamp >= ? group by 1, 2""", (since,)):
+        spread[sid][day] = n
+    first = datetime.fromtimestamp(since).date().isoformat()
+    start = {sid: day for sid, day in c.execute("select id, date(started_at, 'unixepoch', 'localtime') from sessions") if day and day >= first}
+    for sid, v in cost.items():
+        sp = spread.get(sid) or ({start[sid]: 1} if sid in start else {})
+        n = sum(sp.values())
+        for day, k in sp.items():
+            days[day] += v * k / n
+    CAL.update(at=time.time(), days=days)
+    return days
+
+
+def calendar(days, today=None):
+    """GitHub-style year: one column per week, Monday at the top, a month name over its first Monday."""
+    today = today or datetime.now().date()
+    d = today - timedelta(days=today.weekday() + 52 * 7)
+    shown, out, mx = {}, "", max(days.values(), default=0) or 1
+    while d <= today:
+        if d.weekday() == 0:
+            out += f'<span>{LOC[lang()]["months"][d.month - 1] if d.day <= 7 or not out else ""}</span>'
+        v = shown[d] = days.get(d.isoformat(), 0.0)
+        lvl = 1 + min(int(math.sqrt(v / mx) * 4), 3) if v > 0 else 0   # square root, so small days stay visible
+        out += f'<i class="h{lvl}" title="{tr("cal.cell", day=when(datetime(d.year, d.month, d.day).timestamp(), "day"), v=money(v))}"></i>'
+        d += timedelta(days=1)
+    active = [x for x in shown.items() if x[1] > 0]
+    if not active:
+        return f'<p class="hint">{tr("nodata")}</p>'
+    bd, bv = max(active, key=lambda x: x[1])
+    scale = "".join(f'<i class="h{i}"></i>' for i in range(5))
+    return (f'<div class="cal" role="img" aria-label="{tr("cal.title")}">{out}</div>'
+            f'<div class="scale">{tr("heat.less")}{scale}{tr("heat.more")}</div>'
+            f'<p class="hint">{tr("cal.sum", n=len(active), total=len(shown), day=when(datetime(bd.year, bd.month, bd.day).timestamp(), "day"), v=money(bv))}</p>')
+
+
 def page_history(p):
     d, d30 = data_for(p), data_for("30")
     tot, ttl = d["total"] or 1, d["ttl"]
@@ -1543,6 +1593,8 @@ def page_history(p):
 {stacked(d)}</section>
 <section class="card"><h2>{tr("hist.when")}</h2>
 <p class="hint">{tr("hist.when.hint")}</p>{heatmap(d30)}</section>
+<section class="card"><h2>{tr("cal.title")}</h2>
+<p class="hint">{tr("cal.hint")}</p>{calendar(day_costs())}</section>
 <section class="sec"><h2>{tr("hist.days")}</h2>
 {table(["th.day", "th.cost", "th.share", "th.steps", "th.sessions", "th.top"], rows, ("", "", "o", "", "o", "l o"))}</section>"""
     return layout(tr("nav.history") + " · Usagecast", "/history", p, tr("nav.history"), tr("sub.hermes", period=period_text(d)), body)
@@ -2066,7 +2118,10 @@ def selftest():
         assert post(f"http://127.0.0.1:{srv.server_port}") == 200 and load_settings()["theme"] == "dark"   # 303 to the page
         srv.shutdown()
         LAST_PUSH.update(at=time.time(), ok=False, reply="<x>")
-        leftover = re.compile(r"\b(?:th|set|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
+        assert abs(sum(day_costs().values()) - real) < 1e-9, (day_costs(), real)   # the calendar loses nothing
+        cal = calendar({(datetime.now().date() - timedelta(days=1)).isoformat(): 2.0})
+        assert cal.count('class="h4" title') == 1 and cal.count("<i ") >= 365 + 5, cal[:200]
+        leftover = re.compile(r"\b(?:th|set|cal|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
             SET["ntfy_topic"] = "usagecast-test" if code != "en" else ""   # English: not set up yet, the others: subscribe steps

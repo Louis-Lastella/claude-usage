@@ -218,6 +218,10 @@
   "heat.cell": "{wd} {h}:00–{h2}:00: {v}",
   "heat.less": "less",
   "heat.more": "more",
+  "cal.title": "The last year",
+  "cal.hint": "API value per day. Each column is one week, Monday at the top.",
+  "cal.cell": "{day}: {v}",
+  "cal.sum": "Active on {n} of the last {total} days. Busiest day: {day} with {v}.",
   "heat.peak": "Most of it came on {wd} between {h}:00 and {h2}:00 ({v}). Most expensive weekday: {bwd} with {bv}.",
 
   "det.tools": "Tools",
