@@ -1,8 +1,8 @@
 {
-  "name": "Claude-Verbrauch",
-  "short_name": "Verbrauch",
-  "description": "Was in Hermes die Claude-Usage frisst",
-  "lang": "de",
+  "name": "Usagecast",
+  "short_name": "Usagecast",
+  "description": "See what eats your AI usage",
+  "lang": "en",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -1,0 +1,17 @@
+# systemd user service: copy to ~/.config/systemd/user/, then
+#   systemctl --user daemon-reload && systemctl --user enable --now usagecast
+# To keep it running without a login session: loginctl enable-linger "$USER"
+[Unit]
+Description=Usagecast dashboard (127.0.0.1:7681)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/usagecast
+Environment=PORT=7681 HERMES_HOME=%h/.hermes PYTHONUNBUFFERED=1
+# Optional: Environment=USAGECAST_URL=https://your-dashboard USAGECAST_NTFY=https://ntfy.sh/your-topic USAGECAST_LANG=en
+ExecStart=/usr/bin/python3 %h/usagecast/app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

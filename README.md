@@ -1,89 +1,100 @@
-# claude-usage
+# Usagecast
 
-Eigenes Dashboard, das zeigt, was in [Hermes](https://github.com/NousResearch/hermes-agent) die Claude-Usage frisst:
-jedes Tool, jeder Skill, jedes Plugin, jeder Teil des Systemprompts, Denken, Hintergrund-Prüfung, Cache-Neuaufbau nach
-Pausen und Cache-Brüche. Dazu die Pro-Limits (5 Stunden, Woche, Extra-Guthaben) mit Prognose, Warnungen aufs Handy und
-konkrete Spartipps aus den eigenen Daten.
+**English** · [Deutsch](README.de.md)
 
-Eine Datei, nur Python-Standardbibliothek, liest `~/.hermes/state.db` und `~/.hermes/logs/agent.log*` nur lesend.
-Keine KI: Rangliste, Aufteilung, Prognose und Spartipps sind feste Rechenregeln, es geht nie eine Anfrage an ein Modell raus.
+A self-hosted dashboard that shows what eats your AI usage. Right now it reads
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) with Anthropic Claude and breaks the cost down into every
+tool, skill, plugin, system prompt part, thinking, background review, cache rebuilds after pauses and cache breaks. On
+top of that it shows your subscription limits (5 hours, week, extra credits) with a forecast, sends alerts to your phone
+and gives concrete tips from your own data.
 
-Läuft mit jeder Hermes-Installation. Welche Plugins und welcher Memory-Anbieter aktiv sind, liest es aus
-`config.yaml` (`plugins.enabled`, `memory.provider`) und ordnet deren Teile im Systemprompt und an den Nachrichten
-danach zu. SOUL.md, Hermes' eigene Hinweise und die Herkunft (Telegram, Discord, Slack, Cron-Jobs ...) erkennt es
-ebenfalls selbst.
+Pure Python standard library. It reads `~/.hermes/state.db` and `~/.hermes/logs/agent.log*` read-only. No AI involved:
+ranking, breakdown, forecast and tips are fixed calculation rules, and no request ever goes to a model.
 
-## Seiten
+It works with any Hermes installation. It reads the active plugins and memory provider from `config.yaml`
+(`plugins.enabled`, `memory.provider`) and assigns their parts of the system prompt and of your messages accordingly.
+It also detects SOUL.md, Hermes' own notes and where a session came from (Telegram, Discord, Slack, cron jobs ...).
 
-| Seite | Inhalt |
+## Pages
+
+| Page | Content |
 |---|---|
-| `/` | Limits mit Prognose, Kennzahlen, Rangliste was am meisten frisst, Herkunft, Modelle, Spartipps |
-| `/verlauf` | Kosten pro Tag nach den größten Posten, Heatmap nach Wochentag und Uhrzeit, Tagestabelle |
-| `/details` | Alle Tools, Skills, Plugins, Systemprompt-Teile und Tool-Beschreibungen einzeln |
-| `/sessions` | Teuerste Sessions mit Filter nach Herkunft und Suche, Reiter Cron-Jobs mit Kosten pro Lauf und Woche |
-| `/projekte` | Kosten pro Projekt, antippen zeigt die Sessions dazu |
+| `/` | Limits with forecast, key figures, what eats the most, origins, models, tips |
+| `/history` | Cost per day by the biggest items, heatmap by weekday and hour, day-by-day table |
+| `/details` | Every tool, skill, plugin, system prompt part and tool description on its own |
+| `/sessions` | Most expensive sessions with origin filter and search, cron tab with cost per run and per week |
+| `/projects` | Cost per project, tap one to see its sessions |
 
-Zeitraum per `?p=w` (seit dem letzten Reset des Wochenlimits, Standard), `?p=1`, `?p=7` oder `?p=30`.
+Period with `?p=w` (since the last weekly limit reset, default), `?p=1`, `?p=7` or `?p=30`.
 
-Hell und dunkel folgen der Systemeinstellung. Auf dem iPhone in Safari öffnen und „Zum Home-Bildschirm“ wählen, dann
-startet es wie eine App.
+Light and dark mode follow the system setting. On an iPhone, open it in Safari and choose "Add to Home Screen" to start
+it like an app.
 
-## So wird gerechnet
+## Languages
 
-1. **Echte Kosten:** `session_model_usage` enthält pro Session die Tokens, die Anthropic gemeldet hat (Input,
-   Cache lesen, Cache schreiben, Output). Mit der offiziellen API-Preisliste (`PRICES` in `app.py`) ergibt das den
-   exakten API-Gegenwert. Beim Pro-Abo zählt Anthropic das Limit nach denselben Gewichten.
-2. **Aufteilung:** Jede Session wird Schritt für Schritt nachgespielt. Für jeden API-Call ist bekannt, was im Prompt
-   stand (Systemprompt-Teile, Tool-Beschreibungen, jede Tool-Rückgabe, Plugin-Einblendungen, Nachrichten, Denken),
-   was neu dazukam und was aus dem Cache kam.
-3. **Cache:** Wo Hermes' `agent.log` den Call hat (`in=… cache=…`), zählt der echte Cache-Wert. So werden auch
-   Cache-Brüche ohne Pause sichtbar. Sonst gilt die Regel: nach mehr als `cache_ttl` (5 min oder 1 h) Pause ist der
-   Cache weg.
-4. **Eichung:** Größen kommen aus der Textlänge (Bilder pauschal) und werden pro Session auf die echten Token-Zahlen
-   skaliert. Die Summe aller Posten ist immer exakt gleich den echten Kosten (Selbsttest prüft das).
-5. **Zeitraum:** Kosten zählen nach dem Zeitpunkt jedes einzelnen Schritts. Eine Session, die vor dem Zeitraum begann,
-   zählt nur mit dem Teil, der in den Zeitraum fällt.
+English is the default. Switch to German with the link at the bottom of every page or with `?lang=de`, the choice is
+kept in a cookie. `USAGECAST_LANG=de` makes German the default for the dashboard and the alerts.
 
-Nicht gespeichertes Denken (Output, den Hermes nicht als Text ablegt) wird aus der Differenz zum echten Output
-ergänzt und bleibt wie echtes Denken im Verlauf.
+All text lives in `locales/<code>.json`. For a new language, copy `locales/en.json`, translate the values and run
+`python3 app.py --test`. The self-test checks that every language has the same keys and placeholders and that every page
+renders without leftover keys.
 
-**Projekte:** Hermes speichert nur bei Sessions im Terminal einen Arbeitsordner. Alle anderen Sessions zählen zu dem
-Projekt, dessen Pfad in ihren Tool-Aufrufen am häufigsten vorkommt: Ordner unter `/opt` und `/srv` sowie Git-Repos im
-Home-Ordner (auch eine Ebene tiefer, etwa `~/projects/app`). Hermes' eigener Ordner zählt nur, wenn sonst kaum etwas
-vorkommt.
+## How it calculates
 
-**Prognose:** Die Woche wird linear aus dem Tempo seit dem letzten Reset hochgerechnet, das 5-Stunden-Fenster aus dem
-Tempo der letzten Stunde.
+1. **Real cost:** `session_model_usage` holds the tokens Anthropic reported for every session (input, cache read, cache
+   write, output). With the official API price list (`PRICES` in `app.py`) this gives the exact API value. On a Pro or
+   Max plan Anthropic counts the limit with the same weights.
+2. **Breakdown:** Every session is replayed step by step. For each API call it is known what was in the prompt (system
+   prompt parts, tool descriptions, every tool result, plugin injections, messages, thinking), what was new and what
+   came from the cache.
+3. **Cache:** Where Hermes' `agent.log` has the call (`in=… cache=…`), the real cache value counts. That also reveals
+   cache breaks without a pause. Otherwise the rule applies: after a pause longer than `cache_ttl` (5 min or 1 h) the
+   cache is gone.
+4. **Calibration:** Sizes come from text length (images as a flat amount) and are scaled to the real token counts per
+   session. The sum of all items always equals the real cost exactly (the self-test checks this).
+5. **Period:** Cost counts by the time of each single step. A session that started before the period only counts with
+   the part that falls into it.
 
-## Warnungen per ntfy
+Thinking that Hermes does not store as text is filled in from the difference to the real output and stays in the
+history like stored thinking.
 
-Alle 10 Minuten prüft der Server die Limits und schickt höchstens einmal pro Fenster eine Push-Nachricht, wenn
+**Projects:** Hermes only stores a working folder for terminal sessions. Every other session counts toward the project
+whose path shows up most often in its tool calls: folders under `/opt` and `/srv` and Git repos in the home folder (one
+level deeper too, like `~/projects/app`). Hermes' own folder only counts when hardly anything else shows up.
 
-- die Wochenprognose über 100 % liegt (frühestens einen Tag nach dem Reset),
-- das 5-Stunden-Fenster beim Tempo der letzten Stunde in weniger als 30 Minuten voll ist,
-- das Extra-Guthaben angezapft wird.
+**Forecast:** The week is extrapolated linearly from the pace since the last reset, the 5-hour window from the pace of
+the last hour.
 
-Das Ziel kommt aus Hermes' ntfy-Einstellungen (`NTFY_HOME_CHANNEL`, `NTFY_SERVER_URL`, `NTFY_TOKEN` in `~/.hermes/.env`)
-oder aus `CLAUDE_USAGE_NTFY` (volle URL mit Topic). Ohne beides bleiben Warnungen aus.
+## Alerts via ntfy
 
-## Betrieb
+Every 10 minutes the server checks the limits and sends at most one push message per window when
+
+- the weekly forecast is above 100 % (at the earliest one day after the reset),
+- the 5-hour window will be full in less than 30 minutes at the pace of the last hour,
+- extra credits start being used.
+
+The target comes from Hermes' ntfy settings (`NTFY_HOME_CHANNEL`, `NTFY_SERVER_URL`, `NTFY_TOKEN` in `~/.hermes/.env`)
+or from `USAGECAST_NTFY` (full URL with topic). Without either, alerts stay off.
+
+## Running it
 
 ```bash
-python3 app.py --test        # Selbsttest
-python3 app.py --ntfy-test   # Test-Nachricht an ntfy schicken
-PORT=7681 python3 app.py     # Server auf 127.0.0.1:7681
+python3 app.py --test        # self-test
+python3 app.py --ntfy-test   # send a test alert to ntfy
+PORT=7681 python3 app.py     # server on 127.0.0.1:7681
 ```
 
-| Variable | Bedeutung |
+| Variable | Meaning |
 |---|---|
-| `PORT` | Port auf 127.0.0.1, Standard 7682 |
-| `HERMES_HOME` | Hermes-Ordner, Standard `~/.hermes` |
-| `CLAUDE_USAGE_DATA` | Ablage für Messungen und Limit-Verlauf, Standard `data/` neben `app.py` |
-| `CLAUDE_USAGE_NTFY` | ntfy-Ziel, falls nicht aus Hermes |
-| `CLAUDE_USAGE_URL` | Adresse des Dashboards, ein Tipp auf die Warnung öffnet sie |
+| `PORT` | Port on 127.0.0.1, default 7682 |
+| `HERMES_HOME` | Hermes folder, default `~/.hermes` |
+| `USAGECAST_DATA` | Where measurements and the limit history go, default `data/` next to `app.py` |
+| `USAGECAST_LANG` | Default language, `en` (default) or `de` |
+| `USAGECAST_NTFY` | ntfy target, if not taken from Hermes |
+| `USAGECAST_URL` | Address of the dashboard, tapping an alert opens it |
 
-Im Hintergrund misst der Server einmal am Tag Systemprompt und Tool-Beschreibungen (`--snapshot`, läuft im
-Hermes-venv) und holt alle 10 Minuten die Pro-Limits über Hermes' OAuth-Login. Der Token verlässt dabei den
-Hermes-Prozess nicht. Beides landet in `data/`.
+In the background the server measures the system prompt and tool descriptions once a day (`--snapshot`, runs in the
+Hermes venv) and fetches the subscription limits every 10 minutes through Hermes' OAuth login. The token never leaves
+the Hermes process. Both end up in `data/`.
 
-`claude-usage.service` ist eine Vorlage für einen systemd-Benutzerdienst mit dem Repo unter `~/claude-usage`.
+`usagecast.service` is a template for a systemd user service with the repo in `~/usagecast`.
