@@ -1204,10 +1204,12 @@ def bars(items, tot, ttl, explain=True, n=12, p=None, soft=False, name_of=None):
     out = ""
     for k, v in items[:n]:
         name, why = name_of(k)
-        out += (f'<div class="bar"><div class="row"><span>{brk(name)}</span><span class="v">{pct(v, tot)} · {money(v)}</span></div>'
-                f'<div class="t{" soft" if soft else ""}"><i style="width:{v / top * 100:.1f}%"></i></div>'
-                + (f'<div class="why">{e(why)}</div>' if explain and why and (k in FIXED or not k.startswith("tool:")) else "")
-                + "</div>")  # the sentence for tools would otherwise repeat on every tool
+        head = (f'<div class="row"><span>{brk(name)}</span><span class="v">{pct(v, tot)} · {money(v)}</span></div>'
+                f'<div class="t{" soft" if soft else ""}"><i style="width:{v / top * 100:.1f}%"></i></div>')
+        if explain and why and (k in FIXED or not k.startswith("tool:")):   # the sentence for tools would repeat on every tool
+            out += f'<details class="bar"><summary>{head}</summary><div class="why">{e(why)}</div></details>'
+        else:
+            out += f'<div class="bar">{head}</div>'
     rest = sum(v for _, v in items[n:])
     if rest:
         more = f'<a href="{link("/details", p=p)}">{tr("nav.details")}</a>' if p else tr("nav.details")
@@ -1235,7 +1237,7 @@ def until(t):
 def meter(u, frac=None, hot=False, left=False):
     """Bar with a mark where the time stands. left: shows what is left, bar and mark both run down."""
     pos = 1 - frac if left and frac is not None else frac
-    mark = (f'<b class="now" style="left:{pos * 100:.1f}%" title="{tr("lim.elapsed", p=pc(frac * 100))}"></b>'
+    mark = (f'<b class="now" style="left:{pos * 100:.1f}%" title="{tr("lim.elapsed", p=pc(frac * 100))}"><span class="sr">{tr("lim.elapsed", p=pc(frac * 100))}</span></b>'
             if frac is not None else "")
     w = 100 - u if left else u
     return f'<div class="meter{" hot" if hot else ""}"><i style="width:{min(max(w, 0), 100):.1f}%"></i>{mark}</div>'
@@ -1284,15 +1286,18 @@ def limits_card(week_cost, split=None):
             if u < 100 and reset:
                 # ponytail: even split of what is left; "left today" would need the limit value at midnight
                 left += f'<p class="why">{tr("lim.budget", pct=pc((100 - u) / max((reset - now) / 86400, 1)))}</p>'
+            more = ""
             if week_cost is not None:
-                left += f'<p class="why">{tr("lim.weekcost", cost=cash(week_cost))}</p>'
+                more += f'<p class="why">{tr("lim.weekcost", cost=cash(week_cost))}</p>'
             if split and split["hermes"] + split["cc"] + split["rest"] >= 1:
                 parts = {k: pc(split[k]) for k in ("hermes", "cc", "rest")}
-                more = "".join(" " + tr("lim.split." + k, p=pc(split[k])) for k in ("before", "gap") if split[k] >= 1)
-                left += (f'<p class="why">{tr("lim.split" if CLAUDE.is_dir() else "lim.split.nocc", start=when(split["start"], "daytime"), **parts)}'
-                         f'{more}</p>')
+                extra = "".join(" " + tr("lim.split." + k, p=pc(split[k])) for k in ("before", "gap") if split[k] >= 1)
+                more += (f'<p class="why">{tr("lim.split" if CLAUDE.is_dir() else "lim.split.nocc", start=when(split["start"], "daytime"), **parts)}'
+                         f'{extra}</p>')
             if RATE.get("k"):
-                left += f'<p class="why">{tr("lim.rate", cost=cash(1 / RATE["k"]), n=RATE["hours"])}</p>'
+                more += f'<p class="why">{tr("lim.rate", cost=cash(1 / RATE["k"]), n=RATE["hours"])}</p>'
+            if more:
+                left += f'<details class="more"><summary>{tr("lim.more")}</summary>{more}</details>'
             continue
         hot = u >= 80
         if u >= 100:
@@ -1356,7 +1361,7 @@ def layout(title, active, p, h1, sub, body, tabs=True, keep=None):
             + f'<a href="/settings#push">{tr("foot.ntfy.on" if ntfy_target() else "foot.ntfy.off")}</a>')
     th = SET["theme"]
     metas = "".join(f'<meta name="theme-color" content="{c}"' + (f' media="(prefers-color-scheme: {m})"' if th == "system" else "") + ">"
-                    for m, c in (("light", "#f7f3ec"), ("dark", "#1b1713")) if th in ("system", m))
+                    for m, c in (("light", "#f7f6f4"), ("dark", "#141312")) if th in ("system", m))
     u = urlparse(getattr(_req, "url", "/"))
     q = {k: v[0] for k, v in parse_qs(u.query).items()}
     langs = []

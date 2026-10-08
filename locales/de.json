@@ -126,6 +126,7 @@
   "lim.split.gap": "{p} fielen in Lücken ohne Messwerte.",
   "lim.rate": "1 % der Woche ≈ {cost} API-Gegenwert, gemessen über {n} Stunden.",
   "lim.budget": "Tagesbudget: etwa <strong>{pct} pro Tag</strong> bis zum Reset.",
+  "lim.more": "Mehr zur Woche",
   "lim.five.full_at": "<strong>Zu schnell:</strong> beim Tempo der letzten Stunde in {left} voll (ca. {full}). {reset}",
   "lim.five.enough": "<strong>Im Plan:</strong> ca. {at} beim Reset um {reset}.",
   "lim.forecast": "Prognose ca. {fc}.",
