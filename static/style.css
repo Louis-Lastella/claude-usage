@@ -147,6 +147,10 @@ svg.ovl .w0{stroke:var(--acc);stroke-width:2.5}svg.ovl .w2{opacity:.65}svg.ovl .
 .axis.days span{flex:1;text-align:center}
 svg.chart{width:100%;height:200px;display:block;margin-top:8px}
 svg.chart .hit{fill:transparent}
+svg.chart line.ev{stroke:var(--ink);stroke-width:1.5;stroke-dasharray:4 3;opacity:.5;vector-effect:non-scaling-stroke}
+.evs{list-style:none;margin:4px 0 0;padding:0}
+.evs li{padding:9px 0;border-top:1px solid var(--line);font-size:14px}
+.evs li b{font-weight:500;margin-right:6px}.evs .why{display:block}
 svg.chart g:hover rect:not(.hit){opacity:.8}
 .c0{fill:var(--c0)}.c1{fill:var(--c1)}.c2{fill:var(--c2)}.c3{fill:var(--c3)}.c4{fill:var(--c4)}.c5{fill:var(--c5)}
 .dot.c0{background:var(--c0)}.dot.c1{background:var(--c1)}.dot.c2{background:var(--c2)}.dot.c3{background:var(--c3)}.dot.c4{background:var(--c4)}.dot.c5{background:var(--c5)}

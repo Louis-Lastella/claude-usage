@@ -1083,6 +1083,7 @@ def background():
         refresh_limits(540)
         check_alerts()
         refresh_status()
+        watch_config()
         if SET["currency"] == "EUR":
             refresh_fx()
         time.sleep(600)
@@ -1519,6 +1520,68 @@ def page_overview(p):
     return layout("Usagecast", "/", p, tr("ov.h1"), tr("sub.calc", period=period_text(d), at=hm(d["at"])), body)
 
 
+WATCH = (("model", "default"), ("model", "provider"), ("agent", "reasoning_effort"), ("prompt_caching", "cache_ttl"),
+         ("memory", "provider"))   # config values that change what a step costs, plus the plugin list
+
+
+def read_jsonl(f):
+    try:
+        return [json.loads(x) for x in f.read_text().splitlines() if x.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def watch_config():
+    """Appends the cost-relevant config to data/config.jsonl whenever it changed (the first line is the baseline)."""
+    text = config_text()
+    cfg = {f"{s}.{k}": config_value(s, k, text) for s, k in WATCH}
+    cfg["plugins"] = ", ".join(plugin_names(text))
+    rows = read_jsonl(DATA / "config.jsonl")
+    last = rows[-1]["cfg"] if rows else None
+    if cfg != last:
+        changes = {k: [last.get(k, ""), v] for k, v in cfg.items() if last.get(k, "") != v} if last else {}
+        DATA.mkdir(parents=True, exist_ok=True)
+        with open(DATA / "config.jsonl", "a") as fh:
+            fh.write(json.dumps({"t": round(time.time()), "cfg": cfg, "changes": changes}) + "\n")
+
+
+def change_text(k, a, b):
+    if k == "plugins":
+        old, new = set(filter(None, a.split(", "))), set(filter(None, b.split(", ")))
+        return "plugins " + " ".join([*(f"+{x}" for x in sorted(new - old)), *(f"−{x}" for x in sorted(old - new))])
+    return f"{k.split('.')[-1]} {a or '–'} → {b or '–'}"
+
+
+def events(since, until=math.inf):
+    """[(time, text)]: Hermes updates (pull/merge in the install's git reflog) and the config changes watch_config saw."""
+    out = []
+    try:
+        r = subprocess.run(["git", "-C", str(HERMES / "hermes-agent"), "reflog", "--date=unix", "--format=%gd %gs"],
+                           capture_output=True, text=True, timeout=10)
+        out += [(int(m[1]), tr("ev.update")) for m in re.finditer(r"@\{(\d+)\} (?:pull|merge|rebase \(finish\))", r.stdout)]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    out += [(x["t"], tr("ev.config", what=", ".join(change_text(k, a, b) for k, (a, b) in x["changes"].items())))
+            for x in read_jsonl(DATA / "config.jsonl") if x.get("changes")]
+    return sorted(x for x in out if since <= x[0] < until)
+
+
+def per_step(d30, a, b):
+    """Average API value per step between a and b; None below 20 steps."""
+    a = round(a / 3600) * 3600
+    steps = sum(n for h, n in d30["hsteps"].items() if a <= h < b)
+    return span_sum(d30, a, b) / steps if steps >= 20 else None
+
+
+def event_list(d, d30):
+    now, rows = time.time(), ""
+    for t, text in events(d["since"], min(d["until"], now)):
+        a, b = per_step(d30, t - 7 * 86400, t), per_step(d30, t, min(t + 7 * 86400, now))
+        cmp = tr("ev.cmp", a=money(a), b=money(b), d=signed(b, a)) if a and b else tr("ev.early")
+        rows += f'<li><b>{when(t, "daytime")}</b> {e(text)}<span class="why">{cmp}</span></li>'
+    return f'<p class="hint">{tr("ev.hint")}</p><ul class="evs">{rows}</ul>' if rows else ""
+
+
 def stacked(d):
     """Stacked bars per day (per hour for short periods): the biggest components in color, everything else as rest."""
     hourly, ttl = d["hourly"], d["ttl"]
@@ -1548,6 +1611,11 @@ def stacked(d):
                 rects += f'<rect class="c{j}" x="{i * w + (w - bw) / 2:.2f}" y="{y:.2f}" width="{bw:.2f}" height="{v / mx * 96:.2f}"/>'
                 tip += f"\n{names[j]}: {money(v)}"
         svg += f'<g><title>{e(tip)}</title><rect class="hit" x="{i * w:.2f}" y="0" width="{w:.2f}" height="100"/>{rects}</g>'
+    step = 3600 if hourly else 86400
+    for t, text in events(keys[0], min(d["until"], time.time())):   # dashed line per update / config change
+        i = max(bisect.bisect_right(keys, t) - 1, 0)
+        x = (i + min((t - keys[i]) / step, 1)) * w
+        svg += f'<line class="ev" x1="{x:.2f}" x2="{x:.2f}" y1="0" y2="100"><title>{e(when(t, "daytime") + " · " + text)}</title></line>'
     peak = max(range(len(keys)), key=lambda i: sums[i])
     ax = [tl(keys[i]) for i in (0, len(keys) // 2, -1)]
     legend = "".join(f'<span><span class="dot c{j}"></span>{brk(n)}</span>' for j, n in enumerate(names))
@@ -1667,7 +1735,7 @@ def page_history(p):
     body = f"""<section class="card"><div class="row"><h2>{tr("hist.per.hour" if d["hourly"] else "hist.per.day")}</h2>
 <span class="v">{money(d["total"])}</span></div>
 <p class="hint">{tr("hist.hint")}</p>
-{stacked(d)}</section>
+{stacked(d)}{event_list(d, d30)}</section>
 <section class="card"><h2>{tr("hist.when")}</h2>
 <p class="hint">{tr("hist.when.hint")}</p>{heatmap(d30)}</section>
 <section class="card"><h2>{tr("ovl.title")}</h2>
@@ -2192,6 +2260,16 @@ def selftest():
         CLAUDE = cl.parent
         pr = price("claude-opus-5-5")
         assert cc_calls(0) == [(datetime(2026, 10, 8, 10, tzinfo=timezone.utc).timestamp(), 10 * pr[0] + 1000 * pr[3] + 200 * pr[1] + 100 * pr[2] + 50 * pr[4])]
+        (HERMES / "config.yaml").write_text("model:\n  default: m\nagent:\n  reasoning_effort: high\nplugins:\n  enabled:\n    - a\n")
+        watch_config(); watch_config()
+        assert events(0) == [] and len(read_jsonl(DATA / "config.jsonl")) == 1   # baseline only
+        (HERMES / "config.yaml").write_text("model:\n  default: m\nagent:\n  reasoning_effort: xhigh\nplugins:\n  enabled:\n    - b\n")
+        watch_config()
+        ev = events(0)
+        assert len(ev) == 1 and ev[0][1] == "Config: reasoning_effort high → xhigh, plugins +b −a", ev
+        hs = {h: 10 for h in range(0, 40 * 3600, 3600)}
+        d30 = {"hours": {h: {"x": 1.0 if h < 20 * 3600 else 2.0} for h in hs}, "hsteps": hs}
+        assert per_step(d30, 0, 20 * 3600) == 0.1 and per_step(d30, 20 * 3600, 40 * 3600) == 0.2 and per_step(d30, 0, 3600) is None
         save_settings({**SET, "currency": "EUR"})
         assert load_settings()["currency"] == "EUR" and (DATA / "settings.json").stat().st_mode & 0o777 == 0o600
         SET["currency"] = "USD"
@@ -2211,7 +2289,7 @@ def selftest():
         assert abs(sum(day_costs().values()) - real) < 1e-9, (day_costs(), real)   # the calendar loses nothing
         cal = calendar({(datetime.now().date() - timedelta(days=1)).isoformat(): 2.0})
         assert cal.count('class="h4" title') == 1 and cal.count("<i ") >= 365 + 5, cal[:200]
-        leftover = re.compile(r"\b(?:th|set|cal|ovl|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
+        leftover = re.compile(r"\b(?:th|set|cal|ovl|ev|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
             SET["ntfy_topic"] = "usagecast-test" if code != "en" else ""   # English: not set up yet, the others: subscribe steps
