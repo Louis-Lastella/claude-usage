@@ -126,6 +126,8 @@
   "lim.split.before": "{p} were used before that.",
   "lim.split.gap": "{p} fell into gaps without readings.",
   "lim.rate": "1 % of the week ≈ {cost} of API value, measured over {n} hours.",
+  "lim.fc.weighted": "The forecast follows your weekly rhythm (the last weeks hour by hour): in a backtest it was off by {wtd} on average, a straight line by {lin}, so it is {gain} more accurate.",
+  "lim.fc.linear": "The forecast is a straight line from the pace so far. Your weekly rhythm was not clearly more accurate in a backtest ({wtd} against {lin} off on average).",
   "lim.budget": "Daily budget: about <strong>{pct} per day</strong> until the reset.",
   "lim.more": "More on this week",
   "lim.five.full_at": "<strong>Too fast:</strong> full in {left} at the pace of the last hour (around {full}). {reset}",

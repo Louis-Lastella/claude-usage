@@ -940,6 +940,7 @@ def fresh_limits():
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
 _CC = {}      # transcript -> (mtime, [(time, $)])
 RATE = {}     # limit_split over 30 days: k = weekly-limit % per API dollar
+FC = {}       # weekly rhythm: prof = 168 hourly shares of a limit week, method weighted/linear, backtest errors
 
 
 def cc_calls(since):
@@ -1049,8 +1050,39 @@ def windows(L, now):
 
 
 def week_forecast(u, frac):
-    """Utilization at the reset, linear from the pace since the window started. Meaningful after half a day."""
-    return u / frac if frac and frac >= 1 / 14 else None
+    """Utilization at the reset. Linear from the pace since the window started, or, when the backtest found the weekly
+    rhythm more accurate (FC), divided by the share of a usual week that has passed by now. None in the first half day."""
+    if not frac or frac < 1 / 14:
+        return None
+    p = FC.get("prof") if FC.get("method") == "weighted" else None
+    if p:
+        x = min(frac, 1.0) * 168
+        i = int(x)
+        a = sum(p[:i]) + (p[i] * (x - i) if i < 168 else 0.0)
+        if a >= 0.1:
+            return u / a
+    return u / frac
+
+
+def rhythm(cost, ws, since):
+    """Weekly rhythm from hourly API cost {hour: $}: (profile = mean share of each of the 168 hours of a limit week,
+    {lin, wtd} = mean absolute % error of the final week cost predicted every hour from day 2 to day 6, each week
+    against the profile of the others). Uses up to 4 complete limit weeks before ws that lie after since; needs 3."""
+    weeks = [w for w in ([cost.get(s + 3600 * h, 0.0) for h in range(168)] for s in
+                         (ws - 7 * 86400 * i for i in range(1, 5)) if s >= since) if sum(w) > 0][:4]
+    if len(weeks) < 3:
+        return None, None
+    norm = [[c / sum(w) for c in w] for w in weeks]
+    mean = lambda rows: [sum(r[h] for r in rows) / len(rows) for h in range(168)]
+    err = {"lin": [], "wtd": []}
+    for i, w in enumerate(weeks):
+        p = mean([x for j, x in enumerate(norm) if j != i])
+        for t in range(24, 145):
+            used, a = sum(w[:t]), sum(p[:t])
+            lin = used * 168 / t
+            err["lin"].append(abs(lin - sum(w)) / sum(w))
+            err["wtd"].append(abs((used / a if a >= 0.1 else lin) - sum(w)) / sum(w))
+    return mean(norm), {k: sum(v) / len(v) * 100 for k, v in err.items()}
 
 
 def rate(hist, key, u, start, now):
@@ -1487,6 +1519,9 @@ def limits_card(week_cost, split=None):
                 extra = "".join(" " + tr("lim.split." + k, p=pc(split[k])) for k in ("before", "gap") if split[k] >= 1)
                 more += (f'<p class="why">{tr("lim.split" if CLAUDE.is_dir() else "lim.split.nocc", start=when(split["start"], "daytime"), **parts)}'
                          f'{extra}</p>')
+            if FC.get("method"):
+                gain = pc((1 - FC["wtd"] / FC["lin"]) * 100) if FC["lin"] else pc(0)
+                more += f'<p class="why">{tr("lim.fc." + FC["method"], gain=gain, lin=pc(FC["lin"]), wtd=pc(FC["wtd"]))}</p>'
             if RATE.get("k"):
                 more += f'<p class="why">{tr("lim.rate", cost=cash(1 / RATE["k"]), n=RATE["hours"])}</p>'
             if more:
@@ -1651,6 +1686,21 @@ def compute(p):
                 k = min(k, u / cw)   # ponytail: the rate drifts; never let Hermes' week cost exceed the measured week
             RATE.clear()
             RATE.update(k=k, hours=r.get("hours", 0))
+            if wk:
+                hc = defaultdict(float)
+                for h, v in d["hours"].items():
+                    hc[h] += sum(v.values())
+                for t, c in cc_calls(since):
+                    hc[t - t % 3600] += c
+                prof, bt = rhythm(hc, round(ws / 3600) * 3600, since)
+                FC.clear()
+                if prof:   # the rhythm goes live only when it beat the straight line by at least 10 % in the backtest
+                    FC.update(prof=prof, method="weighted" if bt["wtd"] <= 0.9 * bt["lin"] else "linear", lin=round(bt["lin"], 1),
+                              wtd=round(bt["wtd"], 1))
+                    keep = {k: FC[k] for k in ("method", "lin", "wtd")}
+                    if (read_json(DATA / "forecast.json") or {}).get("method") != keep["method"]:
+                        DATA.mkdir(parents=True, exist_ok=True)
+                        (DATA / "forecast.json").write_text(json.dumps({**keep, "at": round(time.time())}))
         with LOCK:
             for k in [k for k in CACHE if custom(k) and k != p]:
                 CACHE.pop(k)   # ponytail: keep only the latest custom period in memory
@@ -1769,6 +1819,13 @@ def page_overview(p):
 
 WATCH = (("model", "default"), ("model", "provider"), ("agent", "reasoning_effort"), ("prompt_caching", "cache_ttl"),
          ("memory", "provider"))   # config values that change what a step costs, plus the plugin list
+
+
+def read_json(f):
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def read_jsonl(f):
@@ -2563,7 +2620,7 @@ def demo():
 
 def selftest():
     global HERMES, DATA, CLAUDE
-    SET.clear(); SET.update(DEFAULTS); FX.clear()   # the installed settings must not change the expected formats
+    SET.clear(); SET.update(DEFAULTS); FX.clear(); FC.clear()   # the installed settings must not change the expected formats
     # Locales: same keys and placeholders everywhere, every literal key used in the code exists
     src = Path(__file__).read_text("utf-8")
     used = set(re.findall(r'tr\(\s*"([\w.:-]+)"(?=\s*[,)])', src)) | set(re.findall(r'"(th\.[\w]+)"', src))  # "x." + k: below
@@ -2844,6 +2901,17 @@ def selftest():
     assert guard_plan(Lg(60, 10, 0.5), tg, held, {"paused": ["a", "b"]}, {**gs, "guard_jobs": ["a"]}) == ([], ["b"])
     assert guard_plan(Lg(60, 10, 0.5), tg, held, {"paused": ["a"]}, {**gs, "guard": False}) == ([], ["a"])
     assert guard_plan(None, tg, held, {"paused": ["a"]}, gs) == ([], []) and guard_plan(Lg(50, 10, 0.5), tg, jobs, {"paused": ["a"]}, gs) == ([], [])
+    # Weekly rhythm: a week that spends half its cost in the first day; the weighted forecast sees through it
+    ws0, pat = 50 * 7 * 86400, [10.0] * 24 + [10.0 * 24 / 144] * 144
+    hc = {ws0 - 7 * 86400 * i + 3600 * h: c * (1 + 0.1 * i) for i in range(1, 5) for h, c in enumerate(pat)}
+    prof, bt = rhythm(hc, ws0, ws0 - 30 * 86400)
+    assert prof and abs(sum(prof) - 1) < 1e-9 and abs(sum(prof[:24]) - 0.5) < 1e-9 and bt["wtd"] < 1 < bt["lin"], bt
+    assert rhythm(hc, ws0, ws0 - 15 * 86400) == (None, None)   # two weeks are not enough
+    FC.update(prof=prof, method="weighted")
+    assert abs(week_forecast(50, 24 / 168) - 100) < 1e-6 and abs(week_forecast(60, 0.5) - 60 / (0.5 + 0.5 * 60 / 144)) < 1e-6
+    FC["method"] = "linear"
+    assert abs(week_forecast(50, 0.5) - 100) < 1e-9
+    FC.clear()
     # Turns and the chat/spike watch
     assert split_turns([(5, 1.0), (12, 2.0), (13, 1.0), (30, 4.0)], [0, 10, 20]) == [(0, 5, 1, 1.0), (10, 13, 2, 3.0), (20, 30, 1, 4.0)]
     _req.lang, T0, ws = "en", 1e6, {**DEFAULTS, "chat_pct": 3.0, "spike_pct": 3.0}
