@@ -124,11 +124,16 @@ shown there. "Send test" shows the server's reply right away. Your own ntfy serv
 so does Hermes' ntfy channel (`NTFY_HOME_CHANNEL`, `NTFY_SERVER_URL`, `NTFY_TOKEN` in `~/.hermes/.env`).
 `USAGECAST_NTFY` (full URL with topic) sets a default without the settings page.
 
-## Home screen widget (iPhone)
+## Widgets (iPhone home screen and Lock Screen)
 
 `widget/usagecast-widget.js` is a [Scriptable](https://scriptable.app) script that shows the weekly limit and the 5-hour
 window. Copy it into a new script in Scriptable, add a small Scriptable widget, pick the script and put your dashboard
 address into "Parameter". It reads `/api/summary`, so the phone has to reach the dashboard (for example over Tailscale).
+
+The same script works on the Lock Screen (iOS 16 or later): long-press the Lock Screen, tap "Customize", pick the Lock
+Screen, tap the widget area (or the line above the clock), add Scriptable, then tap the new widget, choose the script and
+enter the address as "Parameter". Circular shows the week as a ring, rectangular the week with its reset, a thin bar and
+the 5-hour window, the line above the clock "Week 65% · 5h 6%". iOS tints them to match the clock.
 
 ## Running it
 

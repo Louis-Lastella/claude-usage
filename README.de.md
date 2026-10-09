@@ -128,12 +128,18 @@ das Topic und folgst den drei Schritten dort. „Test senden“ zeigt sofort die
 ntfy-Server mit Zugangs-Token geht auch, ebenso Hermes' ntfy-Kanal (`NTFY_HOME_CHANNEL`, `NTFY_SERVER_URL`, `NTFY_TOKEN`
 in `~/.hermes/.env`). `USAGECAST_NTFY` (volle URL mit Topic) setzt einen Standard ohne die Einstellungsseite.
 
-## Widget für den Home-Bildschirm (iPhone)
+## Widgets (iPhone, Home- und Sperrbildschirm)
 
 `widget/usagecast-widget.js` ist ein Skript für [Scriptable](https://scriptable.app), das Wochenlimit und
 5-Stunden-Fenster zeigt. In Scriptable ein neues Skript anlegen und den Inhalt einfügen, ein kleines Scriptable-Widget
 hinzufügen, das Skript wählen und die Dashboard-Adresse als „Parameter“ eintragen. Es liest `/api/summary`, das Handy
 muss das Dashboard also erreichen (zum Beispiel über Tailscale).
+
+Dasselbe Skript läuft auf dem Sperrbildschirm (ab iOS 16): Sperrbildschirm lange drücken, „Anpassen“, den
+Sperrbildschirm wählen, auf den Widget-Bereich (oder die Zeile über der Uhr) tippen, Scriptable hinzufügen, dann das
+neue Widget antippen, das Skript wählen und die Adresse als „Parameter“ eintragen. Rund zeigt die Woche als Ring,
+rechteckig die Woche mit Reset, einen dünnen Balken und das 5-Stunden-Fenster, die Zeile über der Uhr „Week 65% · 5h 6%“.
+iOS färbt sie passend zur Uhr ein.
 
 ## Betrieb
 
