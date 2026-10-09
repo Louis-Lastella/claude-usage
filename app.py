@@ -25,6 +25,7 @@ DATA = Path(os.environ.get("USAGECAST_DATA", ROOT / "data"))
 PORT = int(os.environ.get("PORT", "7682"))
 PUBLIC_URL = os.environ.get("USAGECAST_URL", "")   # dashboard address, opened when an alert is tapped
 REPO_URL = "https://github.com/Louis-Lastella/usagecast"
+VERSION = (ROOT / "VERSION").read_text().strip() if (ROOT / "VERSION").is_file() else "dev"
 CPT = 3.5            # characters per token, only for proportions; amounts always come from the real token counts
 IMAGE_TOK = 3000     # one image in the history, same units (agent.log shows ~3,900 real tokens)
 LONG_CTX = 100_000   # a step that has to read more history than this counts as expensive
@@ -1672,7 +1673,7 @@ def layout(title, active, p, h1, sub, body, tabs=True, keep=None):
 <nav aria-label="{tr("aria.pages")}">{nav}</nav><div class="foot">{foot}</div></aside>
 <main><header class="top"><div><h1>{h1}</h1><p class="sub">{sub}</p></div>{seg}</header>
 {body}
-<footer class="pf"><nav aria-label="{tr("aria.lang")}">{" · ".join(langs)}</nav><a href="{REPO_URL}">Usagecast</a></footer></main></div></body></html>"""
+<footer class="pf"><nav aria-label="{tr("aria.lang")}">{" · ".join(langs)}</nav><a href="{REPO_URL}">Usagecast {VERSION}</a></footer></main></div></body></html>"""
 
 
 CACHE, LOCK = {}, threading.Lock()
@@ -3030,6 +3031,7 @@ def selftest():
     db, _ = test_db()
     tu = analyze(db, -1, snap, 300, logs={})["sess"]["s"]["turns"]
     assert [(a, b, n) for a, b, n, _ in tu] == [(0.0, 2.0, 2), (1000.0, 1000.0, 1)], tu
+    assert VERSION == re.search(r"^## (\S+)", (ROOT / "CHANGELOG.md").read_text(), re.M)[1], "VERSION and CHANGELOG.md disagree"
     assert demo_db(time.time()).execute("select count(*) from sessions where source = 'cron'").fetchone()[0] > 10   # --demo data builds
     print("selftest ok")
 
