@@ -1568,7 +1568,8 @@ def limits_card(week_cost, split=None):
                          f'{extra}</p>')
             hosts = ingest_hosts()
             if hosts:
-                more += f'<p class="why">{tr("lim.hosts", hosts=", ".join(f"{e(h)} ({when(x['at'], 'daytime')})" for h, x in hosts.items()))}</p>'
+                names = ", ".join(f"{e(h)} ({when(x['at'], 'daytime')})" for h, x in hosts.items())
+                more += f'<p class="why">{tr("lim.hosts", hosts=names)}</p>'
             if FC.get("method"):
                 gain = pc((1 - FC["wtd"] / FC["lin"]) * 100) if FC["lin"] else pc(0)
                 more += f'<p class="why">{tr("lim.fc." + FC["method"], gain=gain, lin=pc(FC["lin"]), wtd=pc(FC["wtd"]))}</p>'
@@ -2696,7 +2697,11 @@ def demo():
     STATE.update(limits={"five_hour": {"utilization": 34.0, "resets_at": iso(five)}, "seven_day": {"utilization": 62.0, "resets_at": iso(reset)},
                          "extra_usage": {"is_enabled": True, "used_credits": 501, "monthly_limit": 2500, "decimal_places": 2, "currency": "USD"}},
                  at=1e12, ok=now)   # at far ahead: refresh_limits() never fetches
-    SET.clear(); SET.update(DEFAULTS, push="off", ntfy_topic="", url="", guard=True, guard_jobs=["d2"]); FX.clear()
+    (DATA / "ingest").mkdir()   # a laptop that reports its Claude Code usage in the evenings
+    (DATA / "ingest" / "macbook.json").write_text(json.dumps({"host": "macbook", "at": round(now - 300), "hours": [
+        [h, 0.8 + 0.1 * (h // 3600 % 5)] for h in range(int(now - 7 * 86400) // 3600 * 3600, int(now), 3600)
+        if datetime.fromtimestamp(h).hour in (19, 20, 21)]}))
+    SET.clear(); SET.update(DEFAULTS, push="off", ntfy_topic="", url="", guard=True, guard_jobs=["d2"], ingest_token="demo"); FX.clear()
     print(f"usagecast demo on http://127.0.0.1:{PORT} (data in {tmp})", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 

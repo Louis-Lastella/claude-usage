@@ -73,8 +73,10 @@ history like stored thinking.
 whose path shows up most often in its tool calls: folders under `/opt` and `/srv` and Git repos in the home folder (one
 level deeper too, like `~/projects/app`). Hermes' own folder only counts when hardly anything else shows up.
 
-**Forecast:** The week is extrapolated linearly from the pace since the last reset, the 5-hour window from the pace of
-the last hour.
+**Forecast:** The 5-hour window is extrapolated from the pace of the last hour. For the week Usagecast backtests two
+methods on your last complete limit weeks: a straight line from the pace since the reset, and your weekly rhythm (which
+share of a usual week's cost has passed by this hour). The rhythm is used when it is at least 10 % more accurate; the
+fold under the weekly limit names the method and both errors (result in `data/forecast.json`).
 
 **Pace and budget:** A mark on each limit bar shows how much of the window has passed. Ahead of it means "Too fast"
 with the time the limit will be full, behind it "On track" with the expected value at the reset. The daily budget is
@@ -83,7 +85,7 @@ under the limits says so.
 
 **Limit split:** From the limit readings every 10 minutes and the cost per hour, Usagecast estimates how much API value
 one percent of your week is. With that it splits the week into Hermes, Claude Code (sessions in `~/.claude/projects` on
-the same machine) and the rest (claude.ai, the apps, other machines). Costs can be shown as a share of the week instead
+the same machine or reported by other machines, see below) and the rest (claude.ai, the apps). Costs can be shown as a share of the week instead
 of money.
 
 **Prices:** A model missing from the price list is priced like Claude Opus and marked "estimated price".
@@ -134,6 +136,22 @@ The same script works on the Lock Screen (iOS 16 or later): long-press the Lock 
 Screen, tap the widget area (or the line above the clock), add Scriptable, then tap the new widget, choose the script and
 enter the address as "Parameter". Circular shows the week as a ring, rectangular the week with its reset, a thin bar and
 the 5-hour window, the line above the clock "Week 65% · 5h 6%". iOS tints them to match the clock.
+
+## Claude Code on other machines
+
+Claude Code on a laptop uses the same limits but writes its transcripts there. `tools/cc-report.py` (standard library,
+Python 3.9 or later) sums its token counts per hour and model and sends only those numbers to the dashboard every 10
+minutes; the limit split then counts them as Claude Code. On `/settings` under "Other machines": create a token, then
+run the command shown there on the other machine, for example
+
+```sh
+curl -fsSO https://dashboard.example:8443/cc-report.py
+python3 cc-report.py --url https://dashboard.example:8443 --token TOKEN --install
+```
+
+On a Mac this loads a LaunchAgent (`dev.usagecast.report`, every 10 minutes); on Linux it prints a crontab line.
+`--dry-run` shows what would be sent. Settings live in `~/.config/usagecast/report.json` (mode 600). The endpoint is
+`POST /api/ingest` with `Authorization: Bearer <token>`; a new token on `/settings` locks out the old one.
 
 ## Running it
 

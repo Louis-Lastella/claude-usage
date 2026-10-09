@@ -74,8 +74,11 @@ Projekt, dessen Pfad in ihren Tool-Aufrufen am häufigsten vorkommt: Ordner unte
 Home-Ordner (auch eine Ebene tiefer, etwa `~/projects/app`). Hermes' eigener Ordner zählt nur, wenn sonst kaum etwas
 vorkommt.
 
-**Prognose:** Die Woche wird linear aus dem Tempo seit dem letzten Reset hochgerechnet, das 5-Stunden-Fenster aus dem
-Tempo der letzten Stunde.
+**Prognose:** Das 5-Stunden-Fenster wird aus dem Tempo der letzten Stunde hochgerechnet. Für die Woche testet Usagecast
+an deinen letzten vollen Limit-Wochen zwei Verfahren: eine gerade Linie aus dem Tempo seit dem Reset und deinen
+Wochenrhythmus (welcher Anteil der Kosten einer üblichen Woche bis zu dieser Stunde anfällt). Der Rhythmus zählt, wenn er
+mindestens 10 % genauer ist; der Ausklapptext unter dem Wochenlimit nennt Verfahren und beide Abweichungen (Ergebnis in
+`data/forecast.json`).
 
 **Tempo und Budget:** Ein Strich auf jedem Limit-Balken zeigt, wie viel vom Fenster schon vorbei ist. Liegt der
 Verbrauch davor, heißt es „Zu schnell“ mit der Uhrzeit, zu der das Limit voll ist, liegt er dahinter, „Im Plan“ mit dem
@@ -84,7 +87,8 @@ Statusseite von Anthropic eine Störung, steht unter den Limits eine Zeile dazu.
 
 **Aufteilung des Limits:** Aus den Limit-Messungen alle 10 Minuten und den Kosten pro Stunde schätzt Usagecast, wie viel
 API-Gegenwert ein Prozent deiner Woche ist. Damit teilt es die Woche in Hermes, Claude Code (Sessions in
-`~/.claude/projects` auf demselben Rechner) und den Rest (claude.ai, die Apps, andere Rechner). Kosten lassen sich statt
+`~/.claude/projects` auf demselben Rechner oder von anderen Rechnern gemeldet, siehe unten) und den Rest (claude.ai,
+die Apps). Kosten lassen sich statt
 in Geld auch als Anteil der Woche anzeigen.
 
 **Preise:** Ein Modell, das in der Preisliste fehlt, bekommt die Preise von Claude Opus und den Hinweis „Preis geschätzt“.
@@ -140,6 +144,23 @@ Sperrbildschirm wählen, auf den Widget-Bereich (oder die Zeile über der Uhr) t
 neue Widget antippen, das Skript wählen und die Adresse als „Parameter“ eintragen. Rund zeigt die Woche als Ring,
 rechteckig die Woche mit Reset, einen dünnen Balken und das 5-Stunden-Fenster, die Zeile über der Uhr „Week 65% · 5h 6%“.
 iOS färbt sie passend zur Uhr ein.
+
+## Claude Code auf anderen Rechnern
+
+Claude Code auf einem Laptop nutzt dieselben Limits, schreibt seine Transkripte aber dort. `tools/cc-report.py`
+(Standardbibliothek, Python 3.9 oder neuer) summiert die Token-Zahlen pro Stunde und Modell und schickt nur diese Zahlen
+alle 10 Minuten ans Dashboard; die Limit-Aufteilung zählt sie dann als Claude Code. Auf `/settings` unter „Andere
+Rechner“ einen Token erstellen und den dort gezeigten Befehl auf dem anderen Rechner ausführen, zum Beispiel
+
+```sh
+curl -fsSO https://dashboard.example:8443/cc-report.py
+python3 cc-report.py --url https://dashboard.example:8443 --token TOKEN --install
+```
+
+Auf dem Mac lädt das einen LaunchAgent (`dev.usagecast.report`, alle 10 Minuten), unter Linux gibt es eine
+crontab-Zeile aus. `--dry-run` zeigt, was gesendet würde. Die Einstellungen liegen in `~/.config/usagecast/report.json`
+(Rechte 600). Der Endpunkt ist `POST /api/ingest` mit `Authorization: Bearer <token>`; ein neuer Token auf `/settings`
+sperrt den alten aus.
 
 ## Betrieb
 
