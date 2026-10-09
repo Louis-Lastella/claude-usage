@@ -10,7 +10,7 @@ moment: tools, skills, plugins, system prompt parts, thinking, cache rebuilds af
   python3 app.py --ntfy-test              send a test alert
   <hermes-venv>/python app.py --snapshot  measure system prompt parts and tool schemas (the server does this daily)
 """
-import bisect, glob, gzip, html, json, math, os, random, re, secrets, sqlite3, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
+import bisect, glob, gzip, html, json, math, os, random, re, secrets, sqlite3, statistics, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -101,13 +101,13 @@ DEFAULTS = {
     "theme": "system", "lang": DEFAULT_LANG, "currency": "USD", "numbers": "compact", "period": DEFAULT_P, "limit_view": "used",
     "cost_unit": "money", "source": "",
     "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True, "alert_free": True, "alert_steps": True,
-    "alert_digest": True,
+    "alert_digest": True, "alert_chat": True, "chat_pct": 0.5, "alert_spike": True, "spike_pct": 3.0,
     "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
     "push": "own" if _TOPIC else "off", "ntfy_server": _SRV, "ntfy_topic": _TOPIC, "ntfy_token": "", "url": PUBLIC_URL,
 }
 CHOICES = {"theme": ("system", "light", "dark"), "lang": tuple(LOC), "currency": ("USD", "EUR"), "numbers": ("compact", "full"),
            "period": tuple(PERIODS), "limit_view": ("used", "left"), "cost_unit": ("money", "week"), "push": ("off", "own", "hermes")}
-RANGES = {"five_min": (5, 240)}
+RANGES = {"five_min": (5, 240), "chat_pct": (0.1, 50.0), "spike_pct": (0.5, 50.0)}
 URL_RX = r"https?://[^\s\"'<>]+"
 HHMM = r"([01]\d|2[0-3]):[0-5]\d"
 FORMATS = {"quiet_from": HHMM, "quiet_to": HHMM, "ntfy_topic": r"[A-Za-z0-9_-]{1,64}", "ntfy_server": URL_RX, "url": f"({URL_RX})?"}
@@ -151,7 +151,11 @@ def clean(form, cur):
         elif k in CHOICES:
             s[k] = v if v in CHOICES[k] else s[k]
         elif k in RANGES:
-            s[k] = min(max(int(v), RANGES[k][0]), RANGES[k][1]) if v.isdigit() else s[k]
+            try:
+                x = type(d)(v.replace(",", "."))
+            except ValueError:
+                x = None
+            s[k] = min(max(x, RANGES[k][0]), RANGES[k][1]) if x is not None and math.isfinite(x) else s[k]
         elif k == "source":
             s[k] = v if v in ("", *profiles()) else s[k]
         elif k == "ntfy_token":
@@ -509,6 +513,20 @@ def break_cause(rows, apos, j, real, prefix):
     return "deep" if real[j][1] <= prefix * 1.1 else "other"
 
 
+def split_turns(steps, users):
+    """[(start, end, steps, $)] of one session: a turn = the API steps between two user messages. steps: [(time, $)]
+    in order, users: sorted user message times."""
+    out = []
+    for t, c in steps:
+        i = bisect.bisect_right(users, t)
+        start = users[i - 1] if i else steps[0][0]
+        if out and out[-1][0] == start:
+            out[-1] = (start, t, out[-1][2] + 1, out[-1][3] + c)
+        else:
+            out.append((start, t, 1, c))
+    return out
+
+
 def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
     """Splits the real costs since `since` (or of one session) over components, origin and time.
     Invariant: sum(comp) == real cost of the calls in the period. Contains only ids, no display text."""
@@ -544,10 +562,11 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
 
     for s, rows in usage.items():
         src, title, hsh, started, repo_root = meta.get(s, ("?", None, None, 0, None))
-        sc, n_calls = defaultdict(float), 0
+        sc, n_calls, turns, last = defaultdict(float), 0, [], [0.0]
 
         def put(k, v, t):
             sc[k] += v
+            last[0] = max(last[0], t)
             h = t - t % 3600
             hours[h][k] += v
             hsess[h].add(s)
@@ -603,7 +622,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
             SO = sum(sum(x[4].values()) for x in calls)
             fr, fw = (cr / SR, (cw + ci) / SW) if SR and SW else (0.0, (cr + cw + ci) / (SR + SW or 1))
             fo = co / SO if SO else 0.0
-            p_cost, apos = 0.0, [i for i, m in enumerate(msgs[s]) if m[0] == "assistant"]
+            p_cost, apos, tsteps = 0.0, [i for i, m in enumerate(msgs[s]) if m[0] == "assistant"], []
             # ponytail: a result is written once and read on every later step; rebuilds and compression are ignored
             ts = [x[0] for x in calls]
             for m in msgs[s]:
@@ -628,6 +647,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
                 for k, v in parts.items():
                     put(k, v, t)
                 p_cost += cost
+                tsteps.append((t, cost))
                 n_calls += 1
                 hsteps[t - t % 3600] += 1
                 tot["n_steps"] += 1; tot["logged"] += logged
@@ -649,6 +669,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
                     breaks[why][1] += lost * fw
                 if sid:
                     steps.append((t, ctx_tok, cost, lost * fw, (kind + ":" + why if why else kind) if lost > 1e-9 else "", keys))
+            turns = split_turns(tsteps, sorted(m[6] for m in msgs[s] if m[0] == "user"))
             for t, k, n in sizes:
                 if since < t <= until:
                     sizes_acc[k][0] += 1; sizes_acc[k][1] += n
@@ -665,6 +686,7 @@ def analyze(c, since, snap, ttl, sid=None, logs=None, until=math.inf):
         where[org] += total_s
         top = max(sc.items(), key=lambda x: x[1])[0]
         sess[s] = dict(title=title, src=src, origin=org, calls=n_calls, cost=total_s, top=top, started=started, comp=dict(sc),
+                       turns=turns, last=last[0],
                        project=project_of((m[4] for m in msgs.get(s, ()) if m[4]), repos, prx, repo_root))
     # 5 min -> 1 h: rebuilds after pauses up to 1 h disappear, every write costs 2/1.25 = 1.6x. The other way round accordingly.
     if ttl <= 300:
@@ -1089,13 +1111,13 @@ def ntfy_target():
     return None
 
 
-def send_push(title, text, prio=4):
+def send_push(title, text, prio=4, path=""):
     """(sent, the server's reply). Priority 4 = high (limit almost full, week won't last), 3 = normal, 2 = low."""
     t = ntfy_target()
     if not t:
         return False, tr("set.push.state.off")
     server, topic, token = t
-    body = {"topic": topic, "title": title, "message": text, "priority": prio, **({"click": SET["url"]} if SET["url"] else {})}
+    body = {"topic": topic, "title": title, "message": text, "priority": prio, **({"click": SET["url"] + path} if SET["url"] else {})}
     headers = {"Content-Type": "application/json", **({"Authorization": "Bearer " + token} if token else {})}
     try:
         with urllib.request.urlopen(urllib.request.Request(server, json.dumps(body).encode(), headers), timeout=15) as r:
@@ -1106,8 +1128,8 @@ def send_push(title, text, prio=4):
         return False, str(err)
 
 
-def notify(title, text, prio=4):
-    ok, reply = send_push(title, text, prio)
+def notify(title, text, prio=4, path=""):
+    ok, reply = send_push(title, text, prio, path)
     if not ok:
         print("ntfy:", reply, flush=True)
     return ok
@@ -1129,7 +1151,45 @@ def digest(now, sent, L, get=None, s=None):
                                        cost=cash(w["total"]), delta=delta, top=label(top[0][0], w["ttl"])[0] if top else "–")
 
 
-PRIO = {"free": 3, "seven_day@80": 3, "digest": 2}   # ntfy priority by alert kind, everything else 4 (high)
+NOT_CHAT = ("cron", "subagent")   # sources that are no conversation with a person
+
+
+def watch(d30, now, sent, k, s=None):
+    """Chat watch and spike alerts [(tag, title, text, path)] for runs with a step in the last 20 minutes: a long chat
+    whose replies have become expensive, and a cron run or a single reply far above its usual cost. k: weekly % per
+    API dollar (limit_split); without it both stay silent."""
+    s = s or SET
+    if not k:
+        return []
+    med = lambda v: statistics.median(v) if v else 0.0
+    chats = [x for x in d30["sess"].values() if x["src"] not in NOT_CHAT]
+    usual = med([t[3] for x in chats for t in x["turns"]])
+    fresh = med([t[3] for x in chats if x["started"] >= d30["since"] for t in x["turns"][:3]])
+    out = []
+    for sid, x in d30["sess"].items():
+        if now - x["last"] > 1200:
+            continue
+        title, path = x["title"] or tr("untitled"), "/s/" + quote(sid)
+        if x["src"] == "cron":
+            runs = [y["cost"] for y in d30["sess"].values() if y["origin"] == x["origin"] and y["started"] < x["started"]]
+            m = med(runs) if len(runs) >= 3 else 0.0
+            if s["alert_spike"] and x["cost"] * k >= max(3 * m * k, s["spike_pct"]) and f"spike:{sid}" not in sent:
+                text = tr("alert.spike.cron", name=x["origin"][5:] or tr("untitled"), x=pct(x["cost"] * k, 100))
+                out.append((f"spike:{sid}", tr("alert.spike"), text + (" " + tr("alert.spike.usual", m=pct(m * k, 100)) if m else ""), path))
+            continue
+        if x["src"] in NOT_CHAT or not x["turns"]:
+            continue
+        t0, _, n, c = x["turns"][-1]
+        if s["alert_spike"] and c * k >= max(3 * usual * k, s["spike_pct"]) and f"spike:{sid}:{t0:.0f}" not in sent:
+            out.append((f"spike:{sid}:{t0:.0f}", tr("alert.spike"), tr("alert.spike.turn", title=title, n=n, x=pct(c * k, 100)), path))
+        done = x["turns"][:-1][-3:]   # ponytail: the newest turn may still run, it counts once the next message came
+        per = sum(t[3] for t in done) / 3 * k if len(done) == 3 else 0.0
+        if s["alert_chat"] and per >= s["chat_pct"] and f"chat:{sid}" not in sent:
+            out.append((f"chat:{sid}", tr("alert.chat"), tr("alert.chat.text", title=title, x=pct(per, 100), y=pct(fresh * k, 100)), path))
+    return out
+
+
+PRIO = {"free": 3, "seven_day@80": 3, "digest": 2, "chat": 3}   # ntfy priority by alert kind, everything else 4 (high)
 
 
 def check_alerts():
@@ -1140,10 +1200,13 @@ def check_alerts():
         sent = {}
     if not STATE["limits"] or quiet_now(time.time()):  # in quiet hours due alerts wait, nothing is marked as sent
         return
-    msgs, new = alerts(STATE["limits"], limit_history(), sent, time.time())
-    msgs += [x for x in [digest(time.time(), sent, STATE["limits"])] if x]
-    for tag, title, text in msgs:
-        if notify(title, text, PRIO.get(tag.split(":")[0], 4)):
+    now = time.time()
+    msgs, new = alerts(STATE["limits"], limit_history(), sent, now)
+    msgs += [x for x in [digest(now, sent, STATE["limits"])] if x]
+    if RATE.get("k") and (SET["alert_chat"] or SET["alert_spike"]):
+        msgs += watch(data_for("30"), now, sent, RATE["k"])
+    for tag, title, text, *path in msgs:
+        if notify(title, text, PRIO.get(tag.split(":")[0], 4), *path):
             new[tag] = time.time()
     if new != sent:
         DATA.mkdir(parents=True, exist_ok=True)
@@ -2108,6 +2171,9 @@ def page_settings(q):
             f' inputmode="numeric" aria-label="{T("a.five.min")}"><span class="why">{T("min")}</span>')
     quiet = (f'{check("quiet")}<input type="time" id="quiet_from" name="quiet_from" value="{s["quiet_from"]}" aria-label="{T("quiet.from")}">'
              f'<span class="why">–</span><input type="time" id="quiet_to" name="quiet_to" value="{s["quiet_to"]}" aria-label="{T("quiet.to")}">')
+    share = lambda k: (f'<input type="number" id="{k}" name="{k}" value="{s[k]}" min="{RANGES[k][0]}" max="{RANGES[k][1]}" step="0.1"'
+                       f' inputmode="decimal" aria-label="{T(k)}"><span class="why">{T("pct")}</span>')
+    nok = "" if RATE.get("k") else " " + T("a.nok")
     ps, main = profiles(), tr("set.src.main", path=e(str(HERMES)))
     source = (field("source", T("src.label"), select("source", [("", main), *((x, e(x)) for x in ps)],
                                                      s["source"] if s["source"] in ps else ""), T("src.why")) if ps
@@ -2116,6 +2182,8 @@ def page_settings(q):
                + field("alert_extra", T("a.extra"), check("alert_extra"), T("a.extra.why"))
                + field("alert_free", T("a.free"), check("alert_free"), T("a.free.why"))
                + field("alert_steps", T("a.steps"), check("alert_steps"), T("a.steps.why"))
+               + field("alert_chat", T("a.chat"), check("alert_chat") + share("chat_pct"), T("a.chat.why") + nok)
+               + field("alert_spike", T("a.spike"), check("alert_spike") + share("spike_pct"), T("a.spike.why") + nok)
                + field("alert_digest", T("a.digest"), check("alert_digest"), T("a.digest.why")) + field("quiet", T("quiet"), quiet, T("quiet.why")))
     host, own = urlparse(s["ntfy_server"]).netloc, s["ntfy_server"] != "https://ntfy.sh"
     target = ntfy_target()
@@ -2598,6 +2666,23 @@ def selftest():
                 text = re.sub(r"<[^>]+>", " ", page)
                 assert not leftover.search(text) and "{" not in text, (code, leftover.search(text), text[:300])
     assert "&lt;x&gt;" in page_settings({"done": ["test"]}) and 'data-theme="dark"' in page_settings({})
+    # Turns and the chat/spike watch
+    assert split_turns([(5, 1.0), (12, 2.0), (13, 1.0), (30, 4.0)], [0, 10, 20]) == [(0, 5, 1, 1.0), (10, 13, 2, 3.0), (20, 30, 1, 4.0)]
+    _req.lang, T0, ws = "en", 1e6, {**DEFAULTS, "chat_pct": 3.0, "spike_pct": 3.0}
+    ss = lambda src, cost, costs, last, org=None, st=0: dict(src=src, title="T", cost=cost, last=last, origin=org or src, started=st,
+                                                         turns=[(T0 + i, T0 + i, 3, c) for i, c in enumerate(costs)])
+    d30w = {"since": 0, "sess": {"a": ss("telegram", 16, [1, 1, 1, 4, 4, 4, 1], T0 + 100), "b": ss("cli", 15, [1, 1, 1, 1, 1, 10], T0 + 100),
+                                 "old": ss("telegram", 99, [9, 9, 9, 9], T0 - 1300),
+                                 **{f"c{i}": ss("cron", 1.0, [], 0, "cron:job", i) for i in range(3)}, "c9": ss("cron", 10.0, [], T0 + 50, "cron:job", 9)}}
+    wm = watch(d30w, T0 + 200, {}, 1.0, ws)
+    assert [x[0] for x in wm] == ["chat:a", "spike:b:1000005", "spike:c9"] and "4.0%" in wm[0][2] and "~1.0%" in wm[0][2] and wm[0][3] == "/s/a", wm
+    assert "~1.0%" in wm[2][2] and "6 steps" not in wm[1][2] and "3 steps" in wm[1][2], wm
+    assert watch(d30w, T0 + 200, {x[0]: 1 for x in wm}, 1.0, ws) == [] and watch(d30w, T0 + 200, {}, None, ws) == []
+    assert watch(d30w, T0 + 200, {}, 1.0, {**ws, "alert_chat": False, "alert_spike": False}) == []
+    assert clean({"chat_pct": "1,5", "spike_pct": "nan"}, DEFAULTS)["chat_pct"] == 1.5 and clean({"spike_pct": "nan"}, DEFAULTS)["spike_pct"] == 3.0
+    db, _ = test_db()
+    tu = analyze(db, -1, snap, 300, logs={})["sess"]["s"]["turns"]
+    assert [(a, b, n) for a, b, n, _ in tu] == [(0.0, 2.0, 2), (1000.0, 1000.0, 1)], tu
     assert demo_db(time.time()).execute("select count(*) from sessions where source = 'cron'").fetchone()[0] > 10   # --demo data builds
     print("selftest ok")
 
