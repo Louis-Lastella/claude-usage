@@ -10,7 +10,7 @@ moment: tools, skills, plugins, system prompt parts, thinking, cache rebuilds af
   python3 app.py --ntfy-test              send a test alert
   <hermes-venv>/python app.py --snapshot  measure system prompt parts and tool schemas (the server does this daily)
 """
-import bisect, glob, gzip, html, json, math, os, random, re, secrets, shutil, sqlite3, statistics, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
+import bisect, glob, gzip, hmac, html, json, math, os, random, re, secrets, shutil, sqlite3, statistics, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -102,7 +102,7 @@ DEFAULTS = {
     "cost_unit": "money", "source": "",
     "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True, "alert_free": True, "alert_steps": True,
     "alert_digest": True, "alert_chat": True, "chat_pct": 0.5, "alert_spike": True, "spike_pct": 3.0, "extra_steps": "",
-    "guard": False, "guard_jobs": [],
+    "guard": False, "guard_jobs": [], "ingest_token": "",
     "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
     "push": "own" if _TOPIC else "off", "ntfy_server": _SRV, "ntfy_topic": _TOPIC, "ntfy_token": "", "url": PUBLIC_URL,
 }
@@ -160,6 +160,8 @@ def clean(form, cur):
             s[k] = min(max(x, RANGES[k][0]), RANGES[k][1]) if x is not None and math.isfinite(x) else s[k]
         elif k == "source":
             s[k] = v if v in ("", *profiles()) else s[k]
+        elif k == "ingest_token":
+            pass   # only the "new token" button sets it
         elif k == "guard_jobs":
             ids = [j["id"] for j in cron_list()]
             s[k] = [j for j in ids if "gj_" + j in form] if ids else s[k]   # unreadable jobs.json: keep the marks
@@ -944,8 +946,8 @@ FC = {}       # weekly rhythm: prof = 168 hourly shares of a limit week, method 
 
 
 def cc_calls(since):
-    """[(time, $)] of Claude Code's API calls on this machine since `since`, from its transcripts (deduplicated:
-    Claude Code writes one line per content block, all with the same message id and usage)."""
+    """[(time, $)] of Claude Code's API calls since `since`: this machine's transcripts (deduplicated: Claude Code
+    writes one line per content block, all with the same message id and usage) plus the hours other machines reported."""
     out = []
     for p in CLAUDE.rglob("*.jsonl"):
         try:
@@ -975,7 +977,51 @@ def cc_calls(since):
                                  + (u.get("output_tokens") or 0) * pr[4]))
             _CC[p] = (m, rows)
         out += [r for r in _CC[p][1] if r[0] >= since]
-    return out
+    return out + [(h, c) for x in ingest_hosts().values() for h, c in x.get("hours", []) if h >= since]
+
+
+HOST_RX = r"[A-Za-z0-9 ._-]{1,40}"
+
+
+def parse_ingest(raw):
+    """(host, since, rows) of a report from tools/cc-report.py, None when it is malformed. rows: [hour, model, input,
+    cache_write, cache_read, output(, of the writes 1-hour cache)] with non-negative numbers."""
+    try:
+        body = json.loads(raw)
+        host, rows, since = body["host"], body["hours"], body.get("since")
+        assert isinstance(host, str) and re.fullmatch(HOST_RX, host) and isinstance(rows, list)
+        assert since is None or isinstance(since, (int, float))
+        out = []
+        for r in rows:
+            assert isinstance(r, list) and len(r) in (6, 7) and isinstance(r[1], str)
+            nums = [r[0], *r[2:]]
+            assert all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 1e13 for v in nums)
+            out.append([int(r[0]) - int(r[0]) % 3600, r[1][:80], *nums[1:], *([0] if len(r) == 6 else [])])
+        return host, since, out
+    except (ValueError, KeyError, TypeError, AssertionError, AttributeError):
+        return None
+
+
+def save_ingest(host, since, rows, now=None):
+    """Prices a report and stores it per host (data/ingest/<host>.json): hours from `since` on are replaced, older ones
+    stay for 35 days, so sending the same report twice changes nothing."""
+    now = now or time.time()
+    cost = defaultdict(float)
+    for h, model, i, w, r, o, w1 in rows:
+        pr, w1 = price(model), min(w1, w)
+        cost[h] += i * pr[0] + (w - w1) * pr[1] + w1 * pr[2] + r * pr[3] + o * pr[4]
+    first = since if since is not None else min(cost, default=now)
+    f = DATA / "ingest" / f"{host}.json"
+    keep = {int(h): c for h, c in (read_json(f) or {}).get("hours", []) if now - 35 * 86400 < h < first}
+    keep.update(cost)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"host": host, "at": round(now), "hours": sorted([h, round(c, 6)] for h, c in keep.items())}))
+
+
+def ingest_hosts():
+    """{host: {at, hours: [[hour, $]]}} of the other machines that report their Claude Code usage."""
+    d = DATA / "ingest"
+    return {x["host"]: x for x in (read_json(f) for f in sorted(d.glob("*.json"))) if x} if d.is_dir() else {}
 
 
 def limit_split(hist, hours, cc, since, min_cost=0.25):
@@ -1517,8 +1563,11 @@ def limits_card(week_cost, split=None):
             if split and split["hermes"] + split["cc"] + split["rest"] >= 1:
                 parts = {k: pc(split[k]) for k in ("hermes", "cc", "rest")}
                 extra = "".join(" " + tr("lim.split." + k, p=pc(split[k])) for k in ("before", "gap") if split[k] >= 1)
-                more += (f'<p class="why">{tr("lim.split" if CLAUDE.is_dir() else "lim.split.nocc", start=when(split["start"], "daytime"), **parts)}'
+                more += (f'<p class="why">{tr("lim.split" if CLAUDE.is_dir() or ingest_hosts() else "lim.split.nocc", start=when(split["start"], "daytime"), **parts)}'
                          f'{extra}</p>')
+            hosts = ingest_hosts()
+            if hosts:
+                more += f'<p class="why">{tr("lim.hosts", hosts=", ".join(f"{e(h)} ({when(x['at'], 'daytime')})" for h, x in hosts.items()))}</p>'
             if FC.get("method"):
                 gain = pc((1 - FC["wtd"] / FC["lin"]) * 100) if FC["lin"] else pc(0)
                 more += f'<p class="why">{tr("lim.fc." + FC["method"], gain=gain, lin=pc(FC["lin"]), wtd=pc(FC["wtd"]))}</p>'
@@ -2282,6 +2331,7 @@ def page_session(sid, p):
 
 
 LAST_PUSH = {}   # result of the last test push, shown on the settings page
+INGEST_SHOWN = {}   # when the ingest token was created: shown in full for 10 minutes after that
 APP_STORE = "https://apps.apple.com/us/app/ntfy/id1625396347"
 COPY_JS = ("var i=document.getElementById('ntfy_topic');i.select();document.execCommand('copy');"
            "if(navigator.clipboard)navigator.clipboard.writeText(i.value);this.textContent=this.dataset.done")
@@ -2363,6 +2413,22 @@ def page_settings(q):
                    f'{" · " + T("guard.held") if j["id"] in held and j.get("state") == "paused" else ""}</span></div>' for j in jl)
     guard_ = field("guard", T("guard.on"), check("guard"), T("guard.on.why")) + (
         field("guard_jobs", T("guard.jobs"), "", T("guard.jobs.why")) + f'<div class="jobs">{rows}</div>' if jl else f'<p class="hint">{T("guard.none")}</p>')
+    tk, url = s["ingest_token"], s["url"] or "https://dashboard.example:8443"
+    full = done == "ingest" and time.time() - INGEST_SHOWN.get("at", 0) < 600
+    if not tk:
+        machines = field("ingest", T("ing.token"), f'<button class="btn primary" id="ingest" name="action" value="ingest">{T("ing.create")}</button>', T("ing.why"))
+    else:
+        machines = field("ingest_tok", T("ing.token"), f'<input id="ingest_tok" value="{e(tk if full else tk[:4] + "…" + tk[-4:])}" readonly class="mono"'
+                         f' spellcheck="false">' + (f'<button type="button" class="btn" data-done="{T("copied")}" onclick="{COPY_JS.replace("ntfy_topic", "ingest_tok")}">'
+                                                    f'{T("copy")}</button>' if full else "")
+                         + f'<button class="btn" name="action" value="ingest" data-q="{e(T("ing.rotate.confirm"))}" onclick="return confirm(this.dataset.q)">'
+                         f'{T("ing.rotate")}</button>', T("ing.shown" if full else "ing.masked"))
+        cmd = f'curl -fsSO {url}/cc-report.py && python3 cc-report.py --url {url} --token {tk if full else "TOKEN"} --install'
+        machines += field("ingest_cmd", T("ing.install"), "", T("ing.install.why")) + f'<p><code class="cmd">{e(cmd)}</code></p>'
+        hosts = ingest_hosts()
+        lines = "".join(f'<li>{tr("set.ing.host", host=e(h), at=when(x["at"], "daytime"), cost=money(sum(c for t, c in x["hours"] if t >= time.time() - 7 * 86400)))}</li>'
+                        for h, x in hosts.items())
+        machines += field("ingest_hosts", T("ing.hosts"), "", f'<ul class="steps">{lines}</ul>' if hosts else T("ing.none"))
     ps, main = profiles(), tr("set.src.main", path=e(str(HERMES)))
     source = (field("source", T("src.label"), select("source", [("", main), *((x, e(x)) for x in ps)],
                                                      s["source"] if s["source"] in ps else ""), T("src.why")) if ps
@@ -2411,7 +2477,7 @@ def page_settings(q):
                   f'<button class="btn" name="action" value="useurl">{T("useurl")}</button>', T("url.why"))
     body = (f'{top}<form method="post" action="/settings" class="set">'
             '<button class="sr" name="action" value="save" tabindex="-1" aria-hidden="true"></button>'  # Enter in a field = save
-            + card("look", T("look"), look) + card("limits", T("limits"), limits) + card("alerts", T("alerts"), alerts_, T("alerts.hint")) + card("guard", T("guard"), guard_, T("guard.hint"))
+            + card("look", T("look"), look) + card("limits", T("limits"), limits) + card("alerts", T("alerts"), alerts_, T("alerts.hint")) + card("guard", T("guard"), guard_, T("guard.hint")) + card("machines", T("ing"), machines, T("ing.hint"))
             + card("push", T("push"), push, T("push.hint")) + card("source", T("src"), source)
             + f'<div class="save"><button class="btn primary" name="action" value="save">{T("save")}</button></div></form>')
     return layout(T("h1") + " · Usagecast", "/settings", s["period"], T("h1"), T("sub"), body, tabs=False)
@@ -2459,6 +2525,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = page_settings(q)
             elif path == "/api/summary":
                 return self.send(api_summary().encode(), "application/json")
+            elif path == "/cc-report.py":
+                return self.send((ROOT / "tools" / "cc-report.py").read_bytes(), "text/x-python; charset=utf-8")
             elif path == "/health":
                 body = "ok"
             else:
@@ -2474,6 +2542,17 @@ class Handler(BaseHTTPRequestHandler):
         """Only /settings: saves the form, then runs the button's action (set up, new topic, test, use this address)."""
         _req.lang, _req.url = pick_lang("", self.headers), self.path
         n = self.headers.get("Content-Length", "0")
+        if urlparse(self.path).path == "/api/ingest":
+            tok = SET["ingest_token"]
+            if not tok or not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + tok).encode()):
+                return self.send_error(401)
+            if not n.isdigit() or int(n) > 2 * 1024 * 1024:
+                return self.send_error(400)
+            rep = parse_ingest(self.rfile.read(int(n)))
+            if not rep:
+                return self.send_error(400)
+            save_ingest(*rep)
+            return self.send(b'{"ok": true}', "application/json")
         if urlparse(self.path).path != "/settings":
             return self.send_error(404)
         if not same_origin(self.headers) or not n.isdigit() or int(n) > 65536:
@@ -2482,6 +2561,9 @@ class Handler(BaseHTTPRequestHandler):
         action = form.get("action", "save")
         s = clean(form, SET)
         bad = [k for k in FORMATS if form.get(k, "").strip().rstrip("/") not in ("", s[k])]   # clean() kept the old value
+        if action == "ingest":
+            s["ingest_token"] = secrets.token_urlsafe(24)
+            INGEST_SHOWN["at"] = time.time()
         if action in ("setup", "newtopic"):
             s["ntfy_topic"] = new_topic()
             s["push"] = "own" if action == "setup" else s["push"]
@@ -2496,7 +2578,7 @@ class Handler(BaseHTTPRequestHandler):
             LAST_PUSH.update(at=time.time(), ok=ok, reply=reply)
         self.send_response(303)
         self.send_header("Location", f"/settings?done={quote(action)}" + (f"&bad={','.join(bad)}" if bad else "")
-                         + ("" if action == "save" or bad else "#push"))
+                         + ("" if action == "save" or bad else "#machines" if action == "ingest" else "#push"))
         self.send_header("Set-Cookie", f"lang={s['lang']}; Path=/; Max-Age=31536000; SameSite=Lax")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -2850,6 +2932,25 @@ def selftest():
         r = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{srv.server_port}/settings", b"quiet_from=25:00&action=save",
                                                           {"Origin": f"http://127.0.0.1:{srv.server_port}"}), timeout=30)
         assert r.url.endswith("bad=quiet_from") and 'role="alert"' in r.read().decode(), r.url
+        def ingest(body, tok):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}/api/ingest", body, {"Authorization": "Bearer " + tok} if tok else {})
+            try:
+                return urllib.request.urlopen(req, timeout=30).status
+            except urllib.error.HTTPError as err:
+                return err.code
+        good = json.dumps({"host": "mac-1", "since": 7200, "hours": [[7205, "claude-opus-5-5", 10, 300, 1000, 50, 100]]}).encode()
+        assert ingest(good, "tk") == 401 and parse_ingest(good)[0] == "mac-1"   # no token created yet
+        SET["ingest_token"] = "tk"
+        assert ingest(good, "") == 401 and ingest(good, "tkx") == 401 and ingest(b"{", "tk") == 400
+        assert ingest(json.dumps({"host": "../x", "hours": []}).encode(), "tk") == 400
+        assert ingest(json.dumps({"host": "a", "hours": [[1, "m", -1, 0, 0, 0]]}).encode(), "tk") == 400
+        assert ingest(good, "tk") == 200 and ingest(good, "tk") == 200 and list(ingest_hosts()) == ["mac-1"]
+        pr = price("claude-opus-5-5")
+        want = 10 * pr[0] + 200 * pr[1] + 100 * pr[2] + 1000 * pr[3] + 50 * pr[4]
+        assert [round(c, 6) for t, c in cc_calls(0) if t == 7200] == [round(want, 6)], cc_calls(0)
+        assert urllib.request.urlopen(f"http://127.0.0.1:{srv.server_port}/cc-report.py", timeout=30).read().startswith(b"#!/usr/bin/env python3")
+        INGEST_SHOWN["at"] = time.time()
+        assert "--token tk --install" in page_settings({"done": ["ingest"]}) and "--token TOKEN" in page_settings({})
         srv.shutdown()
         LAST_PUSH.update(at=time.time(), ok=False, reply="<x>")
         assert abs(sum(day_costs().values()) - real) < 1e-9, (day_costs(), real)   # the calendar loses nothing
