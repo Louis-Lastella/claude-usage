@@ -1,5 +1,7 @@
 # Usagecast
 
+[![test](https://github.com/Louis-Lastella/usagecast/actions/workflows/test.yml/badge.svg)](https://github.com/Louis-Lastella/usagecast/actions/workflows/test.yml)
+
 [English](README.md) · **Deutsch**
 
 Selbst gehostetes Dashboard, das zeigt, was deine KI-Usage frisst. Im Moment liest es

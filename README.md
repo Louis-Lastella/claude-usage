@@ -1,5 +1,7 @@
 # Usagecast
 
+[![test](https://github.com/Louis-Lastella/usagecast/actions/workflows/test.yml/badge.svg)](https://github.com/Louis-Lastella/usagecast/actions/workflows/test.yml)
+
 **English** · [Deutsch](README.de.md)
 
 A self-hosted dashboard that shows what eats your AI usage. Right now it reads
