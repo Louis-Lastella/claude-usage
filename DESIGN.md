@@ -7,7 +7,8 @@ Light or dark follows the system; both are first-class.
 - Warm stone neutrals, not cream paper and not cool grey. One clean sans (the platform UI face: SF Pro on Apple,
   Segoe UI Variable on Windows) for everything; numbers use tabular figures. No serif, no display font.
 - Orange is the only accent and means "look here": the hot limit meter, the main KPI number, the active nav icon,
-  chart series 0 and the heatmap ramp. Ordinary bars and meters are neutral (`--fill`, `--soft`).
+  chart series 0 and the heatmap ramp. Ordinary bars and meters are neutral (`--fill`, `--soft`); comparison lines
+  (earlier weeks) use `--fill`, since `--soft` is too faint for a line.
 - Depth is a 1 px ring (`--line`) plus a soft 1-2 px shadow (`--shc`); dark mode leans on the ring.
 - Radii: cards 14 px, segmented controls 10/7 px, buttons and inputs 8-9 px, filter chips are pills.
 
@@ -30,7 +31,11 @@ limit number 80/600 (-0.04em) · KPI 26/600. Labels are sentence case, never upp
 - Longer explanations fold away: `details.bar` (ranked bars, the bar is the summary) and `details.more`
   (limit card). The verdict and the daily budget stay visible.
 - Savings tips are one list card, not a card grid. KPIs are one strip with hairline dividers.
-- On/off settings are switches (`.set input[type=checkbox]`).
+- On/off settings are switches (`.set input[type=checkbox]`), 38x22 px, 46x28 px on phones.
+- Every fold (`details.more`, `details.bar`, `details.adv`) shows the same small chevron after its label, never the
+  native triangle.
+- A command to copy is a `pre.cmd` block (tinted, mono, wraps, a tap selects all); short commands in text stay `code`.
+- Lists of things with a value (cron jobs, reporting machines) are `.jobs` rows: name left, value right, no bullets.
 - Phone (<= 860 px): the sidebar becomes a bottom tab bar with labels; every control is >= 40-44 px tall.
 - Motion: only 150-200 ms state feedback (switches, folds); nothing animates on load and zoom is locked on phones.
   `prefers-reduced-motion` turns it all off.

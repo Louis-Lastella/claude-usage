@@ -2,6 +2,14 @@
 
 Versions follow [Semantic Versioning](https://semver.org).
 
+## 3.0.1 - 2026-10-09
+
+- Design pass over the parts added in 3.0.0. Settings: the install command for other machines is one readable block,
+  reporting machines are rows like the cron jobs, every fold uses the same chevron, card titles get room above their
+  first row, larger switches on phones.
+- Phones: the custom range sits in the same row as the period tabs (very narrow screens keep the second row).
+- History: the three earlier weeks are readable next to this week.
+
 ## 3.0.0 - 2026-10-09
 
 - Alerts when a chat has become expensive (its last three replies above a share of the week, with what a new chat

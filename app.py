@@ -2075,7 +2075,7 @@ def overlay(w, d30):
     note = tr("ovl.now", cur=money(cur), prev=money(same), d=signed(cur, same)) if same > 0.01 else ""
     return (f'<svg class="ovl" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="{tr("ovl.title")}">{svg}</svg>'
             f'<div class="axis days">{days}</div><div class="lg"><span><span class="dot c0"></span>{tr("ovl.this")}</span>'
-            f'<span><span class="dot f"></span>{tr("ovl.before")}</span></div>' + (f'<p class="hint">{note}</p>' if note else ""))
+            f'<span><span class="dot n"></span>{tr("ovl.before")}</span></div>' + (f'<p class="hint">{note}</p>' if note else ""))
 
 
 def page_history(p):
@@ -2426,11 +2426,11 @@ def page_settings(q):
                          + f'<button class="btn" name="action" value="ingest" data-q="{e(T("ing.rotate.confirm"))}" onclick="return confirm(this.dataset.q)">'
                          f'{T("ing.rotate")}</button>', T("ing.shown" if full else "ing.masked"))
         cmd = f'curl -fsSO {url}/cc-report.py && python3 cc-report.py --url {url} --token {tk if full else "TOKEN"} --install'
-        machines += field("ingest_cmd", T("ing.install"), "", T("ing.install.why")) + f'<p><code class="cmd">{e(cmd)}</code></p>'
+        machines += field("ingest_cmd", T("ing.install"), "", T("ing.install.why")) + f'<pre class="cmd">{e(cmd)}</pre>'
         hosts = ingest_hosts()
-        lines = "".join(f'<li>{tr("set.ing.host", host=e(h), at=when(x["at"], "daytime"), cost=money(sum(c for t, c in x["hours"] if t >= time.time() - 7 * 86400)))}</li>'
+        lines = "".join(f'<div class="job"><span class="fname">{e(h)}</span><span class="why">{tr("set.ing.host", at=when(x["at"], "daytime"), cost=money(sum(c for t, c in x["hours"] if t >= time.time() - 7 * 86400)))}</span></div>'
                         for h, x in hosts.items())
-        machines += field("ingest_hosts", T("ing.hosts"), "", f'<ul class="steps">{lines}</ul>' if hosts else T("ing.none"))
+        machines += field("ingest_hosts", T("ing.hosts"), "", "" if hosts else T("ing.none")) + (f'<div class="jobs">{lines}</div>' if hosts else "")
     ps, main = profiles(), tr("set.src.main", path=e(str(HERMES)))
     source = (field("source", T("src.label"), select("source", [("", main), *((x, e(x)) for x in ps)],
                                                      s["source"] if s["source"] in ps else ""), T("src.why")) if ps

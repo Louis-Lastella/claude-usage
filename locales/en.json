@@ -427,7 +427,7 @@
   "set.ing.install": "Set up a machine",
   "set.ing.install.why": "Run this in a terminal on the other machine (Python 3.9 or later; replace TOKEN when it is hidden). On a Mac it installs a background job that reports every 10 minutes, on Linux it prints a crontab line. Only numbers are sent, no prompts or file names.",
   "set.ing.hosts": "Reporting machines",
-  "set.ing.host": "{host}: last report {at}, {cost} in the last 7 days",
+  "set.ing.host": "Last report {at} · {cost} in the last 7 days",
   "set.ing.none": "No machine has reported yet.",
   "set.pct": "% of week",
   "set.quiet": "Quiet hours",

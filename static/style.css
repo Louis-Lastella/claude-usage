@@ -101,15 +101,15 @@ svg.spark polyline{fill:none;stroke-width:2;vector-effect:non-scaling-stroke;str
 svg.spark .w{stroke:var(--acc)}svg.spark .f{stroke:var(--soft);stroke-width:1.5}
 .axis{display:flex;justify-content:space-between;gap:10px;color:var(--faint);font-size:12px;margin-top:6px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:4px;margin:0 5px 0 12px}
-.dot.f{background:var(--soft)}
+.dot.f{background:var(--soft)}.dot.n{background:var(--fill)}
 /* disclosure for the longer explanations (limit card, ranked bars) */
 details.more{margin-top:12px}
-details.more>summary,details.bar>summary{list-style:none;cursor:pointer}
-details.more>summary::-webkit-details-marker,details.bar>summary::-webkit-details-marker{display:none}
+details.more>summary,details.bar>summary,details.adv>summary{list-style:none;cursor:pointer}
+details.more>summary::-webkit-details-marker,details.bar>summary::-webkit-details-marker,details.adv>summary::-webkit-details-marker{display:none}
 details.more>summary{display:inline-flex;align-items:center;gap:7px;padding:4px 0;font-size:13px;font-weight:500;color:var(--mute);transition:color .15s}
 details.more>summary:hover{color:var(--ink)}
-details.more>summary::after,details.bar>summary .row>span:first-child::after{content:"";width:5px;height:5px;border:solid currentColor;border-width:0 1.5px 1.5px 0;transform:translateY(-2px) rotate(45deg);transition:transform .2s var(--ease)}
-details.more[open]>summary::after,details.bar[open]>summary .row>span:first-child::after{transform:translateY(1px) rotate(-135deg)}
+details.more>summary::after,details.adv>summary::after,details.bar>summary .row>span:first-child::after{content:"";width:5px;height:5px;border:solid currentColor;border-width:0 1.5px 1.5px 0;transform:translateY(-2px) rotate(45deg);transition:transform .2s var(--ease)}
+details.more[open]>summary::after,details.adv[open]>summary::after,details.bar[open]>summary .row>span:first-child::after{transform:translateY(1px) rotate(-135deg)}
 details.more[open]>:not(summary),details.bar[open]>.why{animation:pop .22s var(--ease)}
 details.more .why{margin-top:8px}
 
@@ -180,7 +180,7 @@ code{font:12.5px/1.5 var(--mono);background:var(--tint);padding:1px 6px;border-r
 
 /* History */
 svg.ovl{width:100%;height:180px;display:block;margin-top:10px;overflow:visible}
-svg.ovl polyline{fill:none;stroke:var(--soft);stroke-width:1.5;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+svg.ovl polyline{fill:none;stroke:var(--fill);stroke-width:1.5;vector-effect:non-scaling-stroke;stroke-linejoin:round}
 svg.ovl .w0{stroke:var(--acc);stroke-width:2.5}svg.ovl .w2{opacity:.65}svg.ovl .w3{opacity:.4}
 .axis.days span{flex:1;text-align:center}
 svg.chart{width:100%;height:200px;display:block;margin-top:8px}
@@ -213,6 +213,8 @@ aside nav a.end{margin-top:auto}
 .foot a{color:inherit;text-decoration:none}.foot a:hover{color:var(--ink)}
 .pushoff{margin:12px 4px 0}.pushoff a{color:var(--ink)}
 .set .card{scroll-margin-top:16px}
+.set .card>h2+.field{margin-top:12px}
+pre.cmd{margin:0 0 14px;padding:11px 14px;border-radius:10px;background:var(--tint);box-shadow:0 0 0 1px var(--line);font:12.5px/1.6 var(--mono);color:var(--ink2);white-space:pre-wrap;overflow-wrap:anywhere}
 .field{display:flex;justify-content:space-between;align-items:center;gap:8px 28px;padding:14px 0;border-top:1px solid var(--line)}
 .field>div:first-child{flex:1 1 260px;min-width:0}
 .field label,.fname{font-weight:500}
@@ -254,7 +256,7 @@ aside nav a.end{margin-top:auto}
 .state{margin:6px 0 10px;font-size:14.5px}.state strong{font-weight:600}
 .steps{margin:6px 0 4px;padding-left:20px}.steps li{margin:2px 0}
 details.adv{border-top:1px solid var(--line)}
-details.adv summary{cursor:pointer;padding:14px 0;color:var(--mute);font-size:14px;font-weight:500}
+details.adv>summary{display:flex;align-items:center;gap:7px;padding:14px 0;color:var(--mute);font-size:14px;font-weight:500;transition:color .15s}
 details.adv summary:hover{color:var(--ink)}
 .sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
 .cmd{-webkit-user-select:all;user-select:all;cursor:text}
@@ -278,7 +280,8 @@ main{padding:max(22px,calc(env(safe-area-inset-top) + 14px)) 16px calc(92px + en
 .save{bottom:calc(60px + env(safe-area-inset-bottom))}
 .field{flex-direction:column;align-items:stretch}.field>div:first-child{flex:none}.ctl{justify-content:flex-start}
 .top{flex-direction:column;align-items:stretch;margin-bottom:20px}
-.periods{justify-content:flex-start}.periods .seg{display:flex;flex:1 1 100%}.periods .seg a{flex:1 1 auto;text-align:center;padding-inline:6px}details.range form{left:0;right:auto}
+.periods{justify-content:flex-start;flex-wrap:nowrap;gap:6px}.periods .seg{display:flex;flex:1 1 auto;min-width:0}.periods .seg a{flex:1 1 auto;text-align:center;padding-inline:6px}details.range summary{padding-inline:11px}
+.set input[type=checkbox]{width:46px;height:28px}.set input[type=checkbox]::before{width:24px;height:24px}.set input[type=checkbox]:checked::before{transform:translateX(18px)}
 h1{font-size:25px}
 .sec{margin-top:36px}
 .g2,.hero{grid-template-columns:minmax(0,1fr)}
@@ -296,5 +299,6 @@ th,td{padding:10px 10px}.o{display:none}
 .heat{gap:2px;grid-template-columns:20px repeat(24,minmax(0,1fr))}.heat i{height:auto;aspect-ratio:1;border-radius:2px}
 .search input{width:100%}.search{flex:1 1 100%}
 }
+@media (max-width:370px){.periods{flex-wrap:wrap}.periods .seg{flex-basis:100%}details.range form{left:0;right:auto}}
 @media (max-width:400px){th,td{padding:9px 6px}td:first-child,th:first-child{padding-left:12px}td:last-child,th:last-child{padding-right:12px}}
 @media (prefers-reduced-motion:reduce){*,::before,::after{animation:none!important;transition:none!important}}

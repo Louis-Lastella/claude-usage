@@ -427,7 +427,7 @@
   "set.ing.install": "Rechner einrichten",
   "set.ing.install.why": "Im Terminal des anderen Rechners ausführen (Python 3.9 oder neuer; TOKEN ersetzen, wenn er verdeckt ist). Auf dem Mac richtet das einen Hintergrund-Job ein, der alle 10 Minuten meldet, unter Linux gibt es eine crontab-Zeile aus. Gesendet werden nur Zahlen, keine Prompts oder Dateinamen.",
   "set.ing.hosts": "Meldende Rechner",
-  "set.ing.host": "{host}: letzter Bericht {at}, {cost} in den letzten 7 Tagen",
+  "set.ing.host": "Letzter Bericht {at} · {cost} in den letzten 7 Tagen",
   "set.ing.none": "Noch kein Rechner hat gemeldet.",
   "set.pct": "% der Woche",
   "set.quiet": "Ruhezeiten",
