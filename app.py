@@ -10,7 +10,7 @@ moment: tools, skills, plugins, system prompt parts, thinking, cache rebuilds af
   python3 app.py --ntfy-test              send a test alert
   <hermes-venv>/python app.py --snapshot  measure system prompt parts and tool schemas (the server does this daily)
 """
-import bisect, glob, gzip, html, json, math, os, re, secrets, sqlite3, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
+import bisect, glob, gzip, html, json, math, os, random, re, secrets, sqlite3, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2180,6 +2180,87 @@ def test_db(base=0.0):
     return db, msgs
 
 
+DEMO_TOOLS = {"terminal": (1500, "command", "git -C {p} status"), "read_file": (9000, "path", "{p}/app.py"),
+              "search_files": (3000, "path", "{p}"), "patch": (600, "path", "{p}/app.py"), "web_search": (4000, "query", "release notes"),
+              "web_extract": (12000, "url", "https://example.com/docs"), "browser_exec": (2500, "code", "page_info()"),
+              "session_search": (30000, "query", "last deploy"), "skill_view": (6000, "name", "deploy")}
+DEMO_TITLES = ("Fix the checkout bug", "Write release notes", "Plan the week", "Migrate the database", "Review open pull requests",
+               "Draft a blog post", "Tidy up the wiki", "Debug the deploy")
+
+
+def demo_db(now):
+    """A month of made-up sessions for --demo: chats, CLI work on three projects, two cron jobs, now and then a pause."""
+    rnd, (db, _) = random.Random(7), test_db(now - 30 * 86400)
+    for day in range(30, -1, -1):
+        d0 = datetime.fromtimestamp(now - day * 86400).replace(hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(rnd.randint(1, 3) if d0.weekday() >= 5 else rnd.randint(3, 7)):
+            t = d0.timestamp() + rnd.uniform(8, 23) * 3600   # a day person
+            if t > now - 1800:
+                continue
+            kind, proj = rnd.choices(("telegram", "cli", "cron"), (5, 3, 2))[0], rnd.choice(("/opt/shop", "/srv/blog", "/opt/wiki", "/tmp"))
+            title = (f'{rnd.choice(("Daily report", "Inbox digest"))} · {datetime.fromtimestamp(t).strftime("%b %d %H:%M")}'
+                     if kind == "cron" else rnd.choice(DEMO_TITLES))
+            n = rnd.randint(4, 12) if kind == "cron" else rnd.randint(3, 25) if kind == "telegram" else rnd.randint(10, 60)
+            sid = datetime.fromtimestamp(t).strftime("%Y%m%d_%H%M%S_") + "%06x" % rnd.getrandbits(24)
+            rows = [(sid, "user", "please " * rnd.randint(5, 80), None, None, None, t, None)]
+            ctx, prev, calls = 40000 + len(rows[0][2]) / 4, 0, []   # tokens: system prompt + tool schemas + history
+            for j in range(n):
+                gap = rnd.uniform(400, 2400) if rnd.random() < 0.08 else rnd.uniform(10, 90)
+                if t + gap > now - 300:
+                    break
+                t += gap
+                calls.append((ctx, ctx - prev, j == 0 or gap > 300))   # context, new since the last call, cache expired
+                prev = ctx
+                if j == n - 1:
+                    rows.append((sid, "assistant", "Done. " * 20, None, None, None, t, "think " * rnd.randint(10, 200)))
+                    break
+                tool = rnd.choices(list(DEMO_TOOLS), (30, 22, 10, 12, 6, 3, 6, 1, 4))[0]
+                size, arg, val = DEMO_TOOLS[tool]
+                call = json.dumps([{"id": f"c{j}", "function": {"name": tool, "arguments": json.dumps({arg: val.format(p=proj)})}}])
+                res = "x" * int(size * rnd.uniform(0.2, 2))
+                rows += [(sid, "assistant", "", None, call, None, t, "think " * rnd.randint(10, 200)),
+                         (sid, "tool", res, tool, None, f"c{j}", t + 2, None)]
+                ctx += 400 + len(res) / 4
+            if not calls:
+                continue
+            read, write = sum(0 if cold else c - a for c, a, cold in calls), sum(c if cold else a for c, a, cold in calls)
+            db.execute("insert into sessions values(?, ?, ?, null, ?, null)", (sid, kind, title, rows[0][6]))
+            db.execute("insert into session_model_usage values(?, 'claude-opus-5-5', '', ?, ?, ?, ?, ?, ?)",
+                       (sid, len(calls), 5 * len(calls), round(read), round(write), rnd.randint(150, 600) * len(calls), rows[-1][6]))
+            db.executemany("""insert into messages(session_id, role, content, tool_name, tool_calls, tool_call_id, timestamp,
+                reasoning) values(?, ?, ?, ?, ?, ?, ?, ?)""", rows)
+    db.commit()
+    return db
+
+
+def demo():
+    """Usagecast on made-up data (README screenshots, a first look): no Hermes needed, no limit fetch, no alerts."""
+    global HERMES, DATA, CLAUDE
+    now, tmp = time.time(), Path(tempfile.mkdtemp(prefix="usagecast-demo-"))
+    HERMES, DATA, CLAUDE = tmp, tmp / "data", tmp / "claude"
+    (tmp / "cron").mkdir(parents=True)
+    DATA.mkdir()
+    demo_db(now).backup(disk := sqlite3.connect(tmp / "state.db"))
+    disk.close()
+    (tmp / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"name": "Daily report", "schedule_display": "0 7 * * *"},
+                                                                 {"name": "Inbox digest", "schedule_display": "every 360m"}]}))
+    (DATA / "snapshot.json").write_text(json.dumps({"prompt": {}, "at": now, "tools": {
+        "terminal": 1100, "read_file": 480, "search_files": 510, "patch": 560, "web_search": 230, "web_extract": 320, "browser_exec": 1060,
+        "session_search": 2000, "skill_view": 270, "memory": 900, "todo": 390, "cronjob": 2800, "delegate_task": 1650}}))
+    reset, five = now + 2.6 * 86400, now + 2.2 * 3600
+    start = reset - 7 * 86400
+    with open(DATA / "limits.jsonl", "w") as f:   # last week ramps to 85 %, this one to 62 % so far; 5-hour windows refill
+        for t in range(int(now - 7 * 86400), int(now), 600):
+            wk = 62 * ((t - start) / (now - start)) ** 1.15 if t >= start else 85 * (t - start + 7 * 86400) / (7 * 86400)
+            f.write(json.dumps({"t": t, "five_hour": round(min(12 * ((t - five) % 18000) / 3600, 100)), "seven_day": round(wk)}) + "\n")
+    iso = lambda t: datetime.fromtimestamp(t).astimezone().isoformat()
+    STATE.update(limits={"five_hour": {"utilization": 34.0, "resets_at": iso(five)}, "seven_day": {"utilization": 62.0, "resets_at": iso(reset)}},
+                 at=1e12, ok=now)   # at far ahead: refresh_limits() never fetches
+    SET.clear(); SET.update(DEFAULTS, push="off", ntfy_topic="", url=""); FX.clear()
+    print(f"usagecast demo on http://127.0.0.1:{PORT} (data in {tmp})", flush=True)
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+
+
 def selftest():
     global HERMES, DATA, CLAUDE
     SET.clear(); SET.update(DEFAULTS); FX.clear()   # the installed settings must not change the expected formats
@@ -2400,12 +2481,15 @@ def selftest():
                 text = re.sub(r"<[^>]+>", " ", page)
                 assert not leftover.search(text) and "{" not in text, (code, leftover.search(text), text[:300])
     assert "&lt;x&gt;" in page_settings({"done": ["test"]}) and 'data-theme="dark"' in page_settings({})
+    assert demo_db(time.time()).execute("select count(*) from sessions where source = 'cron'").fetchone()[0] > 10   # --demo data builds
     print("selftest ok")
 
 
 if __name__ == "__main__":
     if "--test" in sys.argv:
         selftest()
+    elif "--demo" in sys.argv:
+        demo()
     elif "--ntfy-test" in sys.argv:
         print("sent" if notify(tr("alert.test"), tr("alert.test.text")) else "not sent: ntfy is not configured or not reachable")
     elif "--snapshot" in sys.argv:
