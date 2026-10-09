@@ -18,7 +18,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 ROOT = Path(__file__).resolve().parent
-HERMES = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+# USAGECAST_ROOT: snapshot() sets it before pointing HERMES_HOME at a profile; Hermes re-runs this script on import
+HERMES = Path(os.environ.get("USAGECAST_ROOT") or os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 HERMES_PY = HERMES / "hermes-agent" / "venv" / "bin" / "python"
 DATA = Path(os.environ.get("USAGECAST_DATA", ROOT / "data"))
 PORT = int(os.environ.get("PORT", "7682"))
@@ -98,7 +99,7 @@ def _env_ntfy():
 _SRV, _TOPIC = _env_ntfy()
 DEFAULTS = {
     "theme": "system", "lang": DEFAULT_LANG, "currency": "USD", "numbers": "compact", "period": DEFAULT_P, "limit_view": "used",
-    "cost_unit": "money",
+    "cost_unit": "money", "source": "",
     "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True, "alert_free": True, "alert_steps": True,
     "alert_digest": True,
     "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
@@ -124,6 +125,22 @@ def load_settings():
 SET = load_settings()
 
 
+def profiles():
+    """Hermes profiles (<home>/profiles/<name> with an own state.db) that /settings can analyse instead."""
+    d = HERMES / "profiles"
+    return sorted(p.name for p in d.iterdir() if (p / "state.db").is_file()) if d.is_dir() else []
+
+
+def source_home():
+    """Hermes home the analysis reads (state.db, logs, config.yaml, cron, SOUL.md): the main one or the chosen
+    profile. Code and limits always come from the main home, profiles share the install and the account."""
+    return HERMES / "profiles" / SET["source"] if SET["source"] in profiles() else HERMES
+
+
+def source_name():
+    return "Hermes" if source_home() == HERMES else tr("src.profile", name=html.escape(SET["source"]))
+
+
 def clean(form, cur):
     """Settings from a submitted /settings form: a missing checkbox is off, an invalid value keeps the old one."""
     s = dict(cur)
@@ -135,6 +152,8 @@ def clean(form, cur):
             s[k] = v if v in CHOICES[k] else s[k]
         elif k in RANGES:
             s[k] = min(max(int(v), RANGES[k][0]), RANGES[k][1]) if v.isdigit() else s[k]
+        elif k == "source":
+            s[k] = v if v in ("", *profiles()) else s[k]
         elif k == "ntfy_token":
             s[k] = "" if "token_clear" in form else v or s[k]   # empty field = keep the saved token
         elif k in form and re.fullmatch(FORMATS[k], v):
@@ -148,8 +167,15 @@ def save_settings(s):
     with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:  # holds the ntfy token
         json.dump(s, fh, indent=1)
     tmp.replace(DATA / "settings.json")
+    moved = s.get("source") != SET.get("source")
     SET.clear()
     SET.update(s)
+    if moved:   # another Hermes home: nothing computed so far is valid
+        with LOCK:
+            CACHE.clear()
+        CAL.clear()
+        RATE.clear()
+        threading.Thread(target=ensure_snap, daemon=True).start()
 
 
 def new_topic():
@@ -267,7 +293,7 @@ def row_cost(model, i, r, w, o, ttl):
 
 def config_text():
     try:
-        return (HERMES / "config.yaml").read_text()
+        return (source_home() / "config.yaml").read_text()
     except OSError:
         return ""
 
@@ -299,7 +325,7 @@ def name_rx(n):
 def markers(plugins=None):
     """(system prompt sections, message injections) for this Hermes installation, as [(id, regex)]."""
     plugins = plugin_names() if plugins is None else plugins
-    soul = "soul" if (HERMES / "SOUL.md").is_file() else "base"
+    soul = "soul" if (source_home() / "SOUL.md").is_file() else "base"
     prompt = [(soul, r"\A"), *HERMES_MARKERS, *(("plugin:" + n, rf"^#+ .*{name_rx(n)}") for n in plugins)]
     inject = [*(("plugin:" + n, rf"^(?:<\w+>\s*)?[^\w\n]*{name_rx(n)}") for n in plugins),
               ("notes", r"^\[(?:Note|System note|Context from)")]
@@ -428,7 +454,7 @@ def log_index():
     """Real values per API call from Hermes' agent.log: {session: ([end time], [(total input, of that from cache)])}.
     Rotated files are read only once."""
     idx = defaultdict(list)
-    for f in glob.glob(str(HERMES / "logs" / "agent.log*")):
+    for f in glob.glob(str(source_home() / "logs" / "agent.log*")):
         try:
             sig = (os.path.getmtime(f), os.path.getsize(f))
         except OSError:
@@ -751,6 +777,27 @@ def label(k, ttl=300):
     return k, ""
 
 
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")   # Hermes' reasoning_effort steps
+
+
+def fix(*args):
+    """Copyable hermes command under a tip, aimed at the analysed profile."""
+    h = source_home()
+    words = ["hermes", *(["-p", h.name] if h != HERMES else []), *map(str, args)]
+    return f'<code class="cmd fix">{html.escape(" ".join(words))}</code>'
+
+
+def idle_sets(tools, sets, used):
+    """Enabled toolsets none of whose tools ran, heaviest first: [(name, schema cost)]. sets: tool -> its toolsets."""
+    cost, busy = defaultdict(float), set()
+    for n, v in tools.items():
+        for k in sets.get(n, ()):
+            cost[k] += v
+            if n in used:
+                busy.add(k)
+    return sorted(((k, v) for k, v in cost.items() if k not in busy), key=lambda x: -x[1])
+
+
 def tips(d, snap):
     """[(weight, title, html text)], heaviest first."""
     tot, out = d["total"] or 1, []
@@ -758,7 +805,8 @@ def tips(d, snap):
     save = d["ttl_save"]
     if save > 0.03 * tot:
         key = "tip.ttl1h" if d["ttl_alt"] > 300 else "tip.ttl5m"
-        out.append((save, tr(key), tr(key + ".text", p=p(save))))
+        out.append((save, tr(key), tr(key + ".text", p=p(save))
+                    + fix("config", "set", "prompt_caching.cache_ttl", "1h" if key == "tip.ttl1h" else "5m")))
     br = d["comp"].get("break", 0)
     if br > 0.05 * tot:
         out.append((br * 0.9, tr("tip.break"), tr("tip.break.text", p=p(br))))
@@ -769,17 +817,22 @@ def tips(d, snap):
     s = sum(v for _, v in unused)
     if s > 0.02 * tot:
         top = ", ".join(f"{html.escape(n)} ({p(v)})" for n, v in unused[:4])
-        out.append((s, tr("tip.unused"), tr("tip.unused.text", n=len(unused), p=p(s), top=top)))
+        idle = [k for k, _ in idle_sets(tools, snap.get("sets") or {}, used)][:6]
+        cmd = fix("tools", "disable", "--platform", snap.get("platform") or "cli", *idle) if idle else ""
+        out.append((s, tr("tip.unused"), tr("tip.unused.text", n=len(unused), p=p(s), top=top) + cmd))
     if d["long"] > 0.2 * tot:
         out.append((d["long"] / 2, tr("tip.long"), tr("tip.long.text", p=p(d["long"]), n=nf(LONG_CTX))))
     think = d["comp"].get("think", 0)
     effort = config_value("agent", "reasoning_effort")
-    if think > 0.15 * tot and effort in ("xhigh", "max", "high"):
+    if think > 0.15 * tot and effort in EFFORTS[3:]:
         out.append((think * 0.3, tr("tip.think"), tr("tip.think.text", p=p(think), effort=html.escape(effort),
-                                                       highest=tr("tip.think.highest") if effort in ("xhigh", "max") else "")))
+                                                       highest=tr("tip.think.highest") if effort in ("xhigh", "max") else "")
+                    + fix("config", "set", "agent.reasoning_effort", EFFORTS[EFFORTS.index(effort) - 1])))
     bg = d["comp"].get("task:background_review", 0)
     if bg > 0.05 * tot:  # agent.log shows the review reads the history with its own prompt, so without cache hits
-        out.append((bg, tr("tip.review"), tr("tip.review.text", p=p(bg))))
+        every = ((f"{a}.{b}", config_value(a, b) or "10") for a, b in (("skills", "creation_nudge_interval"), ("memory", "nudge_interval")))
+        cmd = "".join(fix("config", "set", k, 2 * int(v)) for k, v in every if v.isdigit() and int(v))   # 0 = already off
+        out.append((bg, tr("tip.review"), tr("tip.review.text", p=p(bg)) + cmd))
     tl = sorted(((k, v) for k, v in d["comp"].items() if k.startswith("tool:")), key=lambda x: -x[1])
     if tl and tl[0][1] > 0.08 * tot:
         name = tl[0][0][5:]
@@ -788,9 +841,12 @@ def tips(d, snap):
     for org, v in sorted(d["where"].items(), key=lambda x: -x[1]):
         if org.startswith("cron:") and v > 0.05 * tot:
             out.append((v / 2, tr("tip.cron", name=org[5:] or tr("untitled")), tr("tip.cron.text", p=p(v))))
+    mem = config_value("memory", "provider")
     for k, v in d["comp"].items():
         if k.startswith("inj:") and v > 0.03 * tot:
-            out.append((v, tr("tip.inj", name=seg_label(k[4:])), tr("tip.inj.text", p=p(v))))
+            plug = k[4:].removeprefix("plugin:") if k.startswith("inj:plugin:") else ""
+            cmd = fix("plugins", "disable", plug) if plug and plug != mem else ""   # a memory provider isn't a plugin switch
+            out.append((v, tr("tip.inj", name=seg_label(k[4:])), tr("tip.inj.text", p=p(v)) + cmd))
     return sorted(out, key=lambda x: -x[0])
 
 
@@ -839,6 +895,15 @@ def refresh_limits(max_age):
         DATA.mkdir(parents=True, exist_ok=True)
         with open(DATA / "limits.jsonl", "a") as f:
             f.write(json.dumps(row) + "\n")
+
+
+def fresh_limits():
+    """Page loads: with an earlier reading answer at once and fetch in the background (the fetch takes ~2 s).
+    Only the very first reading after a start is waited for."""
+    if STATE["limits"] is None:
+        refresh_limits(120)
+    elif time.time() - STATE["at"] >= 120 and not LIMITS_LOCK.locked():
+        threading.Thread(target=refresh_limits, args=(120,), daemon=True).start()
 
 
 # ---------- Limits: who used them ----------
@@ -1085,9 +1150,14 @@ def check_alerts():
         f.write_text(json.dumps(new))
 
 
+def snap_path():
+    h = source_home()
+    return DATA / ("snapshot.json" if h == HERMES else f"snapshot-{h.name}.json")
+
+
 def load_snap():
     try:
-        return json.loads((DATA / "snapshot.json").read_text())
+        return json.loads(snap_path().read_text())
     except (OSError, ValueError):
         return {}
 
@@ -1106,15 +1176,20 @@ def refresh_status():
         STATUS.clear()
 
 
+def ensure_snap():
+    """Measures prompt and tools again when the snapshot of the analysed Hermes is missing or a day old."""
+    snap = snap_path()
+    if not snap.exists() or time.time() - snap.stat().st_mtime > 86400:
+        try:
+            subprocess.run([str(HERMES_PY), str(Path(__file__).resolve()), "--snapshot"], cwd=HERMES / "hermes-agent",
+                           capture_output=True, timeout=600)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print("snapshot:", e, flush=True)
+
+
 def background():
     while True:
-        snap = DATA / "snapshot.json"
-        if not snap.exists() or time.time() - snap.stat().st_mtime > 86400:
-            try:
-                subprocess.run([str(HERMES_PY), str(Path(__file__).resolve()), "--snapshot"], cwd=HERMES / "hermes-agent",
-                               capture_output=True, timeout=600)
-            except (OSError, subprocess.TimeoutExpired) as e:
-                print("snapshot:", e, flush=True)
+        ensure_snap()
         refresh_limits(540)
         check_alerts()
         refresh_status()
@@ -1132,6 +1207,8 @@ def snapshot():
     logging.disable(logging.WARNING)
     sys.path.insert(0, str(HERMES / "hermes-agent"))
     os.chdir(HERMES / "hermes-agent")
+    os.environ["USAGECAST_ROOT"] = str(HERMES)
+    os.environ["HERMES_HOME"] = str(source_home())   # a profile loads its own config, tools and SOUL.md
     from run_agent import AIAgent
     from agent.system_prompt import build_system_prompt
     platform = (connect().execute("""select source from sessions where source not in ('cron', 'subagent')
@@ -1142,10 +1219,19 @@ def snapshot():
     for label_, seg in segments(build_system_prompt(agent), markers()[0]):
         prompt[label_] += tok(seg)
     tools = {t["function"]["name"]: len(json.dumps(t)) / CPT for t in (agent.tools or [])}
+    try:  # ponytail: private Hermes helper; if it moves, the unused-tools tip just loses its command
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.tools_config import _get_platform_tools
+        from toolsets import resolve_toolset
+        on = {k: set(resolve_toolset(k)) for k in _get_platform_tools(load_config_readonly(), platform)}
+        sets = {n: sorted(k for k, ts in on.items() if n in ts or n.startswith(f"mcp__{k.replace('-', '_')}__"))
+                for n in tools}   # toolsets enabled on this platform that hold the tool
+    except Exception:  # noqa: BLE001
+        sets = {}
     DATA.mkdir(parents=True, exist_ok=True)
-    tmp = DATA / "snapshot.json.tmp"
-    tmp.write_text(json.dumps({"prompt": prompt, "tools": tools, "at": time.time()}))
-    tmp.replace(DATA / "snapshot.json")
+    tmp = snap_path().with_suffix(".tmp")
+    tmp.write_text(json.dumps({"prompt": prompt, "tools": tools, "sets": sets, "platform": platform, "at": time.time()}))
+    tmp.replace(snap_path())
 
 
 # ---------- HTML ----------
@@ -1249,7 +1335,7 @@ def meter(u, frac=None, hot=False, left=False):
 
 def api_summary():
     """Compact JSON for widgets: limits with reset times, the week forecast and this limit week's cost."""
-    refresh_limits(120)
+    fresh_limits()
     L, now = STATE["limits"] or {}, time.time()
     out = {"at": round(STATE["ok"]) or None, "limits": {}}
     for key, u, frac, reset, length in windows(L, now):
@@ -1267,7 +1353,7 @@ def api_summary():
 
 
 def limits_card(week_cost, split=None):
-    refresh_limits(120)
+    fresh_limits()
     L, now = STATE["limits"], time.time()
     if not L:
         return f'<section class="card"><h2>{tr("lim.title")}</h2><p class="hint">{tr("lim.unavailable")}</p></section>'
@@ -1398,7 +1484,7 @@ CACHE, LOCK = {}, threading.Lock()
 
 
 def connect():
-    return sqlite3.connect(f"file:{HERMES / 'state.db'}?mode=ro", uri=True, timeout=15)
+    return sqlite3.connect(f"file:{source_home() / 'state.db'}?mode=ro", uri=True, timeout=15)
 
 
 RANGE_RX = re.compile(r"(\d{4}-\d\d-\d\d)\.\.(\d{4}-\d\d-\d\d)")
@@ -1424,7 +1510,7 @@ def pname(p):
 def since_for(p):
     """(start of the period, whether it really is the limit week)."""
     if p == "w":
-        refresh_limits(120)
+        fresh_limits()
         try:
             return datetime.fromisoformat(STATE["limits"]["seven_day"]["resets_at"]).timestamp() - 7 * 86400, True
         except (KeyError, TypeError, ValueError):
@@ -1438,10 +1524,13 @@ REFRESHING = set()
 
 
 def compute(p):
+    who = SET["source"]
     try:
         since, week = since_for(p)
         d = analyze(connect(), since, load_snap(), cache_ttl(), until=(custom(p) or (0, math.inf))[1])
         d.update(week=week, p=p, at=time.time())
+        if SET["source"] != who:
+            return d
         if p == "30":
             r = limit_split(limit_history(30), d["hours"], cc_calls(since), since) or {}
             k, (ws, wk) = r.get("k"), since_for("w")
@@ -1564,7 +1653,7 @@ def page_overview(p):
 <section class="sec"><h2>{tr("ov.save")}</h2>
 <p class="hint">{tr("ov.save.hint")}</p>
 <div class="tips">{tip_html}</div></section>"""
-    return layout("Usagecast", "/", p, tr("ov.h1"), tr("sub.calc", period=period_text(d), at=hm(d["at"])), body)
+    return layout("Usagecast", "/", p, tr("ov.h1"), tr("sub.calc", src=source_name(), period=period_text(d), at=hm(d["at"])), body)
 
 
 WATCH = (("model", "default"), ("model", "provider"), ("agent", "reasoning_effort"), ("prompt_caching", "cache_ttl"),
@@ -1791,7 +1880,7 @@ def page_history(p):
 <p class="hint">{tr("cal.hint")}</p>{calendar(day_costs())}</section>
 <section class="sec"><h2>{tr("hist.days")}</h2>
 {table(["th.day", "th.cost", "th.share", "th.steps", "th.sessions", "th.top"], rows, ("", "", "o", "", "o", "l o"))}</section>"""
-    return layout(tr("nav.history") + " · Usagecast", "/history", p, tr("nav.history"), tr("sub.hermes", period=period_text(d)), body)
+    return layout(tr("nav.history") + " · Usagecast", "/history", p, tr("nav.history"), tr("sub.hermes", src=source_name(), period=period_text(d)), body)
 
 
 def page_details(p):
@@ -1840,12 +1929,12 @@ def page_details(p):
 {table(["th.item", "th.cost", "th.share"], [(e(label(k, d["ttl"])[0]), money(v), pct(v, tot)) for k, v in tasks])}</section>
 {breaks}<section class="sec"><h2>{tr("det.how")}</h2>
 <p class="hint">{how}</p></section>"""
-    return layout(tr("nav.details") + " · Usagecast", "/details", p, tr("nav.details"), tr("sub.details", period=period_text(d)), body)
+    return layout(tr("nav.details") + " · Usagecast", "/details", p, tr("nav.details"), tr("sub.details", src=source_name(), period=period_text(d)), body)
 
 
 def cron_jobs(d, p):
     try:
-        jobs = json.loads((HERMES / "cron" / "jobs.json").read_text())
+        jobs = json.loads((source_home() / "cron" / "jobs.json").read_text())
         jobs = jobs.get("jobs", []) if isinstance(jobs, dict) else jobs
         sched = {j.get("name"): j.get("schedule_display") or (j.get("schedule") or {}).get("display") or "" for j in jobs}
     except (OSError, ValueError, AttributeError):
@@ -1873,7 +1962,7 @@ def page_sessions(p, q):
     view, src, proj, term = arg("view"), arg("src"), arg("proj"), arg("q")
     tabs = (f'<nav class="chips tabs" aria-label="{tr("aria.view")}">' + chip(tr("ses.all"), view != "cron", link("/sessions", p=p))
             + chip(tr("ses.cron"), view == "cron", link("/sessions", p=p, view="cron")) + "</nav>")
-    sub = tr("sub.hermes", period=period_text(d))
+    sub = tr("sub.hermes", src=source_name(), period=period_text(d))
     if view == "cron":
         return layout(tr("ses.cron") + " · Usagecast", "/sessions", p, tr("nav.sessions"), sub, tabs + cron_jobs(d, p), keep={"view": "cron"})
     sel = [(s, x) for s, x in d["sess"].items() if (not proj or (x["project"] or NO_PROJ) == proj)
@@ -1917,7 +2006,7 @@ def page_projects(p):
            for n, (s, st, c, comp) in rows]
     body = f"""<p class="hint">{tr("proj.hint", hermes=tr("proj.hermes"))}</p>
 {table(["th.project", "th.sessions", "th.steps", "th.cost", "th.share", "th.top"], trs, ("", "", "o", "", "", "l o"), "titles")}"""
-    return layout(tr("nav.projects") + " · Usagecast", "/projects", p, tr("nav.projects"), tr("sub.projects", period=period_text(d)), body)
+    return layout(tr("nav.projects") + " · Usagecast", "/projects", p, tr("nav.projects"), tr("sub.projects", src=source_name(), period=period_text(d)), body)
 
 
 def page_session(sid, p):
@@ -2019,6 +2108,10 @@ def page_settings(q):
             f' inputmode="numeric" aria-label="{T("a.five.min")}"><span class="why">{T("min")}</span>')
     quiet = (f'{check("quiet")}<input type="time" id="quiet_from" name="quiet_from" value="{s["quiet_from"]}" aria-label="{T("quiet.from")}">'
              f'<span class="why">–</span><input type="time" id="quiet_to" name="quiet_to" value="{s["quiet_to"]}" aria-label="{T("quiet.to")}">')
+    ps, main = profiles(), tr("set.src.main", path=e(str(HERMES)))
+    source = (field("source", T("src.label"), select("source", [("", main), *((x, e(x)) for x in ps)],
+                                                     s["source"] if s["source"] in ps else ""), T("src.why")) if ps
+              else field("source", T("src.label"), f'<span class="why">{main}</span>', T("src.none")))
     alerts_ = (field("alert_five", T("a.five"), five, T("a.five.why")) + field("alert_week", T("a.week"), check("alert_week"), T("a.week.why"))
                + field("alert_extra", T("a.extra"), check("alert_extra"), T("a.extra.why"))
                + field("alert_free", T("a.free"), check("alert_free"), T("a.free.why"))
@@ -2059,7 +2152,7 @@ def page_settings(q):
     body = (f'{top}<form method="post" action="/settings" class="set">'
             '<button class="sr" name="action" value="save" tabindex="-1" aria-hidden="true"></button>'  # Enter in a field = save
             + card("look", T("look"), look) + card("limits", T("limits"), limits) + card("alerts", T("alerts"), alerts_, T("alerts.hint"))
-            + card("push", T("push"), push, T("push.hint"))
+            + card("push", T("push"), push, T("push.hint")) + card("source", T("src"), source)
             + f'<div class="save"><button class="btn primary" name="action" value="save">{T("save")}</button></div></form>')
     return layout(T("h1") + " · Usagecast", "/settings", s["period"], T("h1"), T("sub"), body, tabs=False)
 
@@ -2400,6 +2493,15 @@ def selftest():
     assert digest(sun, {dg[0]: sun}, {}, fake.get) is None and digest(sun - 3600 * 2, {}, {}, fake.get) is None
     assert digest(sun, {}, {}, fake.get, {**SET, "alert_digest": False}) is None
     assert kinds({"alert_five": False}) == kinds({"five_min": 20}) == ["seven_day"] and kinds({"alert_week": False}) == ["five_hour"]
+    # Page loads never wait for a limits fetch once there is a reading; only the very first one is waited for
+    saved, orig, calls = dict(STATE), refresh_limits, []
+    globals()["refresh_limits"] = lambda age: (time.sleep(0.5), calls.append(age))
+    STATE.update(limits={"seven_day": {}}, at=0.0)
+    t0 = time.time(); fresh_limits(); assert time.time() - t0 < 0.25
+    STATE.update(limits=None)
+    t0 = time.time(); fresh_limits(); assert time.time() - t0 >= 0.5 and calls
+    globals()["refresh_limits"] = orig
+    STATE.clear(); STATE.update(saved)
     # Settings: a missing checkbox is off, invalid input keeps the old value, the token stays unless removed
     s = clean({"theme": "dark", "currency": "XXX", "five_min": "3", "ntfy_topic": "bad topic", "quiet_from": "25:00",
                "url": "javascript:x", "ntfy_token": ""}, {**SET, "ntfy_token": "tk"})
@@ -2420,6 +2522,21 @@ def selftest():
         db.backup(disk := sqlite3.connect(Path(tmp) / "state.db"))
         disk.close()
         STATE["at"] = time.time()  # no limit fetch during the test
+        # Source: only a profile with its own state.db can be chosen, anything else keeps the old value
+        (HERMES / "profiles" / "work").mkdir(parents=True)
+        (HERMES / "profiles" / "junk").mkdir()
+        db.backup(pdb := sqlite3.connect(HERMES / "profiles" / "work" / "state.db"))
+        pdb.close()
+        assert profiles() == ["work"] and clean({"source": "work"}, SET)["source"] == "work"
+        assert clean({"source": "../x"}, SET)["source"] == clean({"source": "junk"}, SET)["source"] == ""
+        SET["source"] = "work"
+        assert source_home() == HERMES / "profiles" / "work" and snap_path().name == "snapshot-work.json"
+        assert fix("tools", "list") == '<code class="cmd fix">hermes -p work tools list</code>' and "work" in source_name()
+        SET["source"] = "gone"
+        assert source_home() == HERMES and fix("x") == '<code class="cmd fix">hermes x</code>' and source_name() == "Hermes"
+        SET["source"] = ""
+        assert idle_sets({"a": 2, "b": 1, "c": 5, "d": 1}, {"a": ["web"], "b": ["web", "search"], "c": ["browser"]}, {"b"}) \
+            == [("browser", 5)]
         # Limits card: pace verdict and daily budget with half the week gone
         old, nw, _req.lang = STATE["limits"], time.time(), "en"
         STATE["limits"] = {"seven_day": {"utilization": 60, "resets_at": iso(nw + 3.5 * 86400)},

@@ -6,7 +6,7 @@ A self-hosted dashboard that shows what eats your AI usage. Right now it reads
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) with Anthropic Claude and breaks the cost down into every
 tool, skill, plugin, system prompt part, thinking, background review, cache rebuilds after pauses and cache breaks. On
 top of that it shows your subscription limits (5 hours, week, extra credits) with a forecast, sends alerts to your phone
-and gives concrete tips from your own data.
+and gives concrete tips from your own data, with the `hermes` command that applies them.
 
 Pure Python standard library. It reads `~/.hermes/state.db` and `~/.hermes/logs/agent.log*` read-only. No AI involved:
 ranking, breakdown, forecast and tips are fixed calculation rules, and no request ever goes to a model.
@@ -93,7 +93,8 @@ of money.
 `/settings` sets the appearance (light, dark or system, language, USD or EUR at the ECB daily rate, compact or full
 numbers, default period), the limits display (used or left, costs as money or as % of the week) and every alert on its
 own with its threshold and quiet hours. The values go to `data/settings.json`, readable only by its owner; environment
-variables only set the defaults. The form saves only when it was sent from Usagecast's own page.
+variables only set the defaults. The form saves only when it was sent from Usagecast's own page. If Hermes has profiles (`hermes profile create`), the settings also choose which one is analysed; the limits stay
+the same, they belong to the account.
 
 ## Alerts via ntfy
 

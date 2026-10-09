@@ -6,7 +6,7 @@ Selbst gehostetes Dashboard, das zeigt, was deine KI-Usage frisst. Im Moment lie
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) mit Anthropic Claude und schlüsselt die Kosten auf: jedes
 Tool, jeder Skill, jedes Plugin, jeder Teil des Systemprompts, Denken, Hintergrund-Prüfung, Cache-Neuaufbau nach Pausen
 und Cache-Brüche. Dazu kommen die Abo-Limits (5 Stunden, Woche, Extra-Guthaben) mit Prognose, Warnungen aufs Handy und
-konkrete Spartipps aus den eigenen Daten.
+konkrete Spartipps aus den eigenen Daten, mit dem `hermes`-Befehl, der sie umsetzt.
 
 Nur Python-Standardbibliothek. Es liest `~/.hermes/state.db` und `~/.hermes/logs/agent.log*` nur lesend. Keine KI:
 Rangliste, Aufteilung, Prognose und Spartipps sind feste Rechenregeln, es geht nie eine Anfrage an ein Modell raus.
@@ -95,7 +95,8 @@ Unter `/settings` stellst du die Darstellung ein (hell, dunkel oder System, Spra
 Zahlen kurz oder voll, Standard-Zeitraum), die Limit-Anzeige (verbraucht oder übrig, Kosten in Geld oder in % der Woche)
 und jede Warnung einzeln mit Schwelle und Ruhezeiten. Die Werte landen in `data/settings.json`, lesbar nur für den
 Besitzer; Umgebungsvariablen geben nur die Standardwerte vor. Gespeichert wird nur, wenn das Formular von Usagecasts
-eigener Seite kommt.
+eigener Seite kommt. Hat Hermes Profile (`hermes profile create`), wählst du dort auch, welches
+ausgewertet wird; die Limits bleiben gleich, sie gehören zum Konto.
 
 ## Warnungen per ntfy
 

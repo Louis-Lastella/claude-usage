@@ -147,6 +147,8 @@ details.bar>.why{padding:2px 0 10px;max-width:62ch}div.bar>.why{margin-top:7px;m
 .tip+.tip{border-top:1px solid var(--line)}
 .tip b{font:600 14.5px/1.45 var(--display);letter-spacing:-.005em}
 .tip p{margin:0;color:var(--mute);font-size:14px;max-width:68ch}
+.tip .fix{display:block;width:fit-content;max-width:100%;margin-top:8px;color:var(--ink)}
+.tip .fix+.fix{margin-top:4px}
 
 /* Tables */
 .scroll{overflow-x:auto;background:var(--card);border-radius:var(--r);box-shadow:0 0 0 1px var(--line),0 1px 2px var(--shc);margin-top:10px}
