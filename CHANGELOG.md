@@ -2,6 +2,11 @@
 
 Versions follow [Semantic Versioning](https://semver.org).
 
+## 3.0.2 - 2026-10-09
+
+- Tips: "Cron: ... is expensive" only for jobs that will run again. Finished one-shot jobs (a build that ran once)
+  no longer show up there, they can't be run less often.
+
 ## 3.0.1 - 2026-10-09
 
 - Design pass over the parts added in 3.0.0. Settings: the install command for other machines is one readable block,

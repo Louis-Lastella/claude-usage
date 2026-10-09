@@ -868,8 +868,9 @@ def tips(d, snap):
         name = tl[0][0][5:]
         hint = tr("tip.tool." + name) if name in TOOL_HINTS else tr("tip.tool.any", name=html.escape(name))
         out.append((tl[0][1] / 3, tr("tip.tool", name=name), hint + " " + tr("tip.share", p=p(tl[0][1]))))
+    live = {j.get("name") or "" for j in cron_list()}   # finished one-shot jobs can't be run less often
     for org, v in sorted(d["where"].items(), key=lambda x: -x[1]):
-        if org.startswith("cron:") and v > 0.05 * tot:
+        if org.startswith("cron:") and org[5:] in live and v > 0.05 * tot:
             out.append((v / 2, tr("tip.cron", name=org[5:] or tr("untitled")), tr("tip.cron.text", p=p(v))))
     mem = config_value("memory", "provider")
     for k, v in d["comp"].items():
@@ -2968,6 +2969,8 @@ def selftest():
             {"id": "j2", "name": "Once", "state": "scheduled", "repeat": {"times": 1}}]}))
         (DATA / "guard.json").write_text(json.dumps({"paused": ["j1"]}))
         assert [j["id"] for j in cron_list()] == ["j1"] and "Daily report" in guard_note() and clean({"gj_j1": "on", "gj_j2": "on"}, SET)["guard_jobs"] == ["j1"]
+        tp = [t for _, t, _ in tips(dict(total=1.0, ttl_save=0, comp={}, uses={}, long=0, where={"cron:Daily report": 0.5, "cron:Once": 0.5}), {})]
+        assert tp == [tr("tip.cron", name="Daily report")], tp   # no "run it less often" for one-shot jobs
         leftover = re.compile(r"\b(?:th|set|cal|ovl|ev|brk|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
