@@ -4,8 +4,8 @@
 const base = (args.widgetParameter || "http://127.0.0.1:7681").replace(/\/$/, "");
 const col = (light, dark) => Color.dynamic(new Color(light), new Color(dark));
 const C = {
-  bg: col("#f6f1e8", "#1b1713"), ink: col("#2b241d", "#efe6da"), mute: col("#8a7f73", "#7e7368"),
-  accent: col("#d9822b", "#e8954a"), soft: col("#e8dfd2", "#352d26"),
+  bg: col("#ffffff", "#1c1b19"), ink: col("#1c1a18", "#f3f1ee"), mute: col("#67615b", "#a8a29b"),
+  accent: col("#ec7a1c", "#f28a3a"), soft: col("#efedea", "#292724"), fill: col("#8f8982", "#7a746e"),
 };
 
 function text(w, s, color, font) {
@@ -14,12 +14,12 @@ function text(w, s, color, font) {
   return t;
 }
 
-function bar(w, used, width) {
+function bar(w, used, width, hot = used >= 80) {
   const track = w.addStack();
   track.size = new Size(width, 6); track.backgroundColor = C.soft; track.cornerRadius = 3;
   const fill = track.addStack();
   fill.size = new Size(Math.max(6, (width * Math.min(used, 100)) / 100), 6);
-  fill.backgroundColor = C.accent; fill.cornerRadius = 3;
+  fill.backgroundColor = hot ? C.accent : C.fill; fill.cornerRadius = 3;   // orange only when hot (DESIGN.md)
   track.addSpacer();
 }
 
@@ -33,8 +33,8 @@ try {
   const s = await new Request(base + "/api/summary").loadJSON();
   const week = s.limits.seven_day, five = s.limits.five_hour;
   text(w, "Weekly limit", C.mute, Font.mediumSystemFont(11));
-  text(w, Math.round(week.used) + "%", C.ink, new Font("Georgia-Bold", 30));
-  bar(w, week.used, 120);
+  text(w, Math.round(week.used) + "%", C.ink, Font.semiboldSystemFont(30));
+  bar(w, week.used, 120, week.used >= 80 || week.forecast > 100);   // week won't last: hot
   w.addSpacer(4);
   if (week.forecast != null) text(w, "~" + Math.round(week.forecast) + "% at reset", C.mute, Font.systemFont(10));
   w.addSpacer();
