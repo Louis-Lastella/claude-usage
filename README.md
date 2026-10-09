@@ -104,7 +104,7 @@ Every 10 minutes the server checks the limits and sends at most one push message
 - the weekly forecast is above 100 % (at the earliest one day after the reset),
 - the week passes 80 % and 90 %,
 - the 5-hour window is free again after it was full,
-- extra credits start being used,
+- extra credits start being used, and when the month's credits pass one of your steps (e.g. 10 and 20, off by default),
 - a chat has become expensive: its last three replies cost at least 0.5 % of the week each (a new chat starts far
   lower; 0.5 % is what the most expensive 5 % of replies cost on the author's setup),
 - a single run is far off: a cron run or one reply costs three times its usual amount and at least 3 % of the week.

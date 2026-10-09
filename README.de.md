@@ -106,7 +106,8 @@ Alle 10 Minuten prüft der Server die Limits und schickt höchstens einmal pro F
 - die Wochenprognose über 100 % liegt (frühestens einen Tag nach dem Reset),
 - die Woche 80 % und 90 % erreicht,
 - das 5-Stunden-Fenster nach einem vollen Fenster wieder frei ist,
-- das Extra-Guthaben angezapft wird,
+- das Extra-Guthaben angezapft wird, und wenn das Guthaben im Monat eine deiner Stufen überschreitet (z. B. 10 und 20,
+  standardmäßig aus),
 - ein Chat teuer geworden ist: seine letzten drei Antworten kosten je mindestens 0,5 % der Woche (ein neuer Chat liegt
   weit darunter; 0,5 % kosten beim Autor die teuersten 5 % aller Antworten),
 - ein einzelner Lauf aus dem Rahmen fällt: ein Cron-Lauf oder eine Antwort kostet das Dreifache des Üblichen und

@@ -101,7 +101,7 @@ DEFAULTS = {
     "theme": "system", "lang": DEFAULT_LANG, "currency": "USD", "numbers": "compact", "period": DEFAULT_P, "limit_view": "used",
     "cost_unit": "money", "source": "",
     "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True, "alert_free": True, "alert_steps": True,
-    "alert_digest": True, "alert_chat": True, "chat_pct": 0.5, "alert_spike": True, "spike_pct": 3.0,
+    "alert_digest": True, "alert_chat": True, "chat_pct": 0.5, "alert_spike": True, "spike_pct": 3.0, "extra_steps": "",
     "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
     "push": "own" if _TOPIC else "off", "ntfy_server": _SRV, "ntfy_topic": _TOPIC, "ntfy_token": "", "url": PUBLIC_URL,
 }
@@ -110,7 +110,8 @@ CHOICES = {"theme": ("system", "light", "dark"), "lang": tuple(LOC), "currency":
 RANGES = {"five_min": (5, 240), "chat_pct": (0.1, 50.0), "spike_pct": (0.5, 50.0)}
 URL_RX = r"https?://[^\s\"'<>]+"
 HHMM = r"([01]\d|2[0-3]):[0-5]\d"
-FORMATS = {"quiet_from": HHMM, "quiet_to": HHMM, "ntfy_topic": r"[A-Za-z0-9_-]{1,64}", "ntfy_server": URL_RX, "url": f"({URL_RX})?"}
+FORMATS = {"quiet_from": HHMM, "quiet_to": HHMM, "ntfy_topic": r"[A-Za-z0-9_-]{1,64}", "ntfy_server": URL_RX, "url": f"({URL_RX})?",
+           "extra_steps": r"(\d+(\.\d+)?(\s*[,; ]\s*\d+(\.\d+)?)*)?"}
 
 
 def load_settings():
@@ -914,6 +915,9 @@ def refresh_limits(max_age):
         row = {"t": round(time.time())}
         for k in ("five_hour", "seven_day"):
             row[k] = (data.get(k) or {}).get("utilization")
+        x = data.get("extra_usage") or {}
+        if x.get("is_enabled") and x.get("used_credits") is not None:
+            row["extra"] = round(x["used_credits"] / 10 ** (x.get("decimal_places") or 0), 2)
         DATA.mkdir(parents=True, exist_ok=True)
         with open(DATA / "limits.jsonl", "a") as f:
             f.write(json.dumps(row) + "\n")
@@ -1001,6 +1005,25 @@ def limit_split(hist, hours, cc, since, min_cost=0.25):
     return out
 
 
+def extra_months(hist):
+    """[[start, used]] per billing month of the extra credits, from the readings: a month ends where the counter drops
+    (calendar month or any other reset day, whatever the account does)."""
+    out, prev = [], None
+    for h in hist:
+        x = h.get("extra")
+        if x is None:
+            continue
+        if prev is None or x < prev:
+            out.append([h["t"], x])
+        out[-1][1], prev = max(out[-1][1], x), x
+    return out
+
+
+def overrun_usd(fc):
+    """What the part of the week forecast above 100 % would cost in extra credits (billed at API prices), or None."""
+    return (fc - 100) / RATE["k"] if fc and fc > 100 and RATE.get("k") else None
+
+
 # ---------- Limits: forecast + alerts ----------
 WINDOWS = (("five_hour", 5 * 3600), ("seven_day", 7 * 86400), ("seven_day_opus", 7 * 86400), ("seven_day_sonnet", 7 * 86400))
 
@@ -1038,7 +1061,7 @@ def alerts(L, hist, sent, now, s=None):
     """Due alerts [(tag, title, text)] and the new state. A tag stands for one window; the caller stores it after a
     successful send, so every alert comes at most once per window. s: settings (switches, 5-hour threshold)."""
     s = s or SET
-    sent, out, full = {k: v for k, v in sent.items() if k == "extra_used" or now - v < 8 * 86400}, [], []
+    sent, out, full = {k: v for k, v in sent.items() if k == "extra_used" or k.startswith("extra@") or now - v < 8 * 86400}, [], []
     for key, u, frac, reset, length in windows(L, now):
         name = tr("win." + key)
         if u >= 100:
@@ -1074,11 +1097,17 @@ def alerts(L, hist, sent, now, s=None):
     x = (L or {}).get("extra_usage") or {}
     used = x.get("used_credits")
     if x.get("is_enabled") and used is not None:
-        prev = sent.get("extra_used")
+        prev, dp = sent.get("extra_used"), 10 ** (x.get("decimal_places") or 0)
+        if prev is not None and used < prev:   # a new billing month: the steps count again
+            sent = {k: v for k, v in sent.items() if not k.startswith("extra@")}
+        steps = [float(v) for v in re.findall(r"\d+(?:\.\d+)?", s["extra_steps"])]
+        step = max((v for v in steps if used / dp >= v), default=None)   # only the highest step reached, once per month
+        if step is not None and not any(f"extra@{v:g}" in sent for v in steps if v >= step):
+            out.append((f"extra@{step:g}", tr("alert.extra.step", step=nf(step, 0 if step == int(step) else 2), cur=x.get("currency") or ""),
+                        tr("alert.extra.step.text", used=nf(used / dp, 2), limit=nf((x.get("monthly_limit") or 0) / dp, 2), cur=x.get("currency") or "")))
         reset = next((w[3] for w in windows(L, now) if w[3]), 0)  # 5-hour window first, otherwise the week
         tag = f"extra:{reset:.0f}"
         if s["alert_extra"] and prev is not None and used > prev and tag not in sent:  # the state stays old until the alert went out
-            dp = 10 ** (x.get("decimal_places") or 0)
             out.append((tag, tr("alert.extra"), tr("alert.extra.text", used=nf(used / dp, 2),
                                                      limit=nf((x.get("monthly_limit") or 0) / dp, 2), cur=x.get("currency") or "",
                                                      full=tr("alert.full", names=", ".join(full)) + " " if full else "")))
@@ -1410,6 +1439,12 @@ def api_summary():
     x = L.get("extra_usage") or {}
     if x.get("is_enabled"):
         out["extra"] = {k: x.get(k) for k in ("used_credits", "monthly_limit", "currency", "decimal_places")}
+        dp, m = 10 ** (x.get("decimal_places") or 0), extra_months(limit_history(400))
+        out["extra"].update(used=(x.get("used_credits") or 0) / dp, limit=(x.get("monthly_limit") or 0) / dp,
+                            month_start=round(m[-1][0]) if m else None)
+        est = overrun_usd((w or {}).get("forecast"))
+        if est is not None:
+            out["extra"]["estimate_usd"] = round(est, 2)   # credits the week would need at this pace
     d = data_for("w")
     out["week_cost_usd"] = round(d["total"], 2) if d["week"] else None
     return json.dumps(out)
@@ -1474,8 +1509,16 @@ def limits_card(week_cost, split=None):
     if x.get("is_enabled") and x.get("monthly_limit"):
         dp, used = 10 ** (x.get("decimal_places") or 0), x.get("used_credits") or 0
         value = tr("lim.extra.value", used=nf(used / dp, 2), limit=nf(x["monthly_limit"] / dp, 2), cur=e(x.get("currency") or ""))
+        wk = next((w for w in windows(L, now) if w[0] == "seven_day"), None)
+        fc = week_forecast(wk[1], wk[2]) if wk else None
+        est = overrun_usd(fc)
+        why = tr("lim.extra.pace", over=pc(fc - 100), cost=cash(est)) if est is not None else tr("lim.extra.why")
+        # ponytail: reads the whole limits log on every overview; cache by mtime if it ever gets slow
+        past = "".join(f'<p class="why">{tr("lim.extra.month", start=when(t, "day"), used=nf(u, 2), cur=e(x.get("currency") or ""))}</p>'
+                       for t, u in reversed(extra_months(limit_history(400))[:-1]))
+        past = f'<details class="more"><summary>{tr("lim.extra.past")}</summary>{past}</details>' if past else ""
         right += (f'<div class="lim"><div class="row"><span>{tr("lim.extra")}</span><b>{value}</b></div>'
-                  f'{meter(used / x["monthly_limit"] * 100)}<div class="why">{tr("lim.extra.why")}</div></div>')
+                  f'{meter(used / x["monthly_limit"] * 100)}<div class="why">{why}</div>{past}</div>')
     spark = ""
     if len(hist) >= 3:
         t0, t1 = hist[0]["t"], hist[-1]["t"]
@@ -2150,7 +2193,8 @@ def page_settings(q):
         note = T("done." + done)
     note = f'<p class="note" role="status">{note}</p>' if note else ""
     top, push_note = (note, "") if done == "save" else ("", note)
-    names = {"ntfy_topic": "topic", "ntfy_server": "server.url", "url": "url", "quiet_from": "quiet.from", "quiet_to": "quiet.to"}
+    names = {"ntfy_topic": "topic", "ntfy_server": "server.url", "url": "url", "quiet_from": "quiet.from", "quiet_to": "quiet.to",
+             "extra_steps": "a.extra.steps"}
     bad = [T(names[k]) for k in (q.get("bad") or [""])[0].split(",") if k in names]
     if bad:
         top = f'<p class="note" role="alert">{tr("set.bad", fields=", ".join(bad))}</p>'
@@ -2174,12 +2218,16 @@ def page_settings(q):
     share = lambda k: (f'<input type="number" id="{k}" name="{k}" value="{s[k]}" min="{RANGES[k][0]}" max="{RANGES[k][1]}" step="0.1"'
                        f' inputmode="decimal" aria-label="{T(k)}"><span class="why">{T("pct")}</span>')
     nok = "" if RATE.get("k") else " " + T("a.nok")
+    acur = ((STATE["limits"] or {}).get("extra_usage") or {}).get("currency") or ""
     ps, main = profiles(), tr("set.src.main", path=e(str(HERMES)))
     source = (field("source", T("src.label"), select("source", [("", main), *((x, e(x)) for x in ps)],
                                                      s["source"] if s["source"] in ps else ""), T("src.why")) if ps
               else field("source", T("src.label"), f'<span class="why">{main}</span>', T("src.none")))
     alerts_ = (field("alert_five", T("a.five"), five, T("a.five.why")) + field("alert_week", T("a.week"), check("alert_week"), T("a.week.why"))
                + field("alert_extra", T("a.extra"), check("alert_extra"), T("a.extra.why"))
+               + field("extra_steps", T("a.extra.steps"), f'<input id="extra_steps" name="extra_steps" value="{e(s["extra_steps"])}"'
+                       f' inputmode="decimal" placeholder="10, 20" spellcheck="false" autocomplete="off"><span class="why">{e(acur)}</span>',
+                       T("a.extra.steps.why"))
                + field("alert_free", T("a.free"), check("alert_free"), T("a.free.why"))
                + field("alert_steps", T("a.steps"), check("alert_steps"), T("a.steps.why"))
                + field("alert_chat", T("a.chat"), check("alert_chat") + share("chat_pct"), T("a.chat.why") + nok)
@@ -2413,9 +2461,12 @@ def demo():
     with open(DATA / "limits.jsonl", "w") as f:   # last week ramps to 85 %, this one to 62 % so far; 5-hour windows refill
         for t in range(int(now - 7 * 86400), int(now), 600):
             wk = 62 * ((t - start) / (now - start)) ** 1.15 if t >= start else 85 * (t - start + 7 * 86400) / (7 * 86400)
-            f.write(json.dumps({"t": t, "five_hour": round(min(12 * ((t - five) % 18000) / 3600, 100)), "seven_day": round(wk)}) + "\n")
+            ex = 12.4 * (t - now + 7 * 86400) / (4 * 86400) if t < now - 3 * 86400 else 5.01 * (t - now + 3 * 86400) / (3 * 86400)
+            f.write(json.dumps({"t": t, "five_hour": round(min(12 * ((t - five) % 18000) / 3600, 100)), "seven_day": round(wk),
+                                "extra": round(ex, 2)}) + "\n")
     iso = lambda t: datetime.fromtimestamp(t).astimezone().isoformat()
-    STATE.update(limits={"five_hour": {"utilization": 34.0, "resets_at": iso(five)}, "seven_day": {"utilization": 62.0, "resets_at": iso(reset)}},
+    STATE.update(limits={"five_hour": {"utilization": 34.0, "resets_at": iso(five)}, "seven_day": {"utilization": 62.0, "resets_at": iso(reset)},
+                         "extra_usage": {"is_enabled": True, "used_credits": 501, "monthly_limit": 2500, "decimal_places": 2, "currency": "USD"}},
                  at=1e12, ok=now)   # at far ahead: refresh_limits() never fetches
     SET.clear(); SET.update(DEFAULTS, push="off", ntfy_topic="", url=""); FX.clear()
     print(f"usagecast demo on http://127.0.0.1:{PORT} (data in {tmp})", flush=True)
@@ -2609,7 +2660,11 @@ def selftest():
         old, nw, _req.lang = STATE["limits"], time.time(), "en"
         STATE["limits"] = {"seven_day": {"utilization": 60, "resets_at": iso(nw + 3.5 * 86400)},
                            "five_hour": {"utilization": 30, "resets_at": iso(nw + 3600)}}
+        STATE["limits"]["extra_usage"] = {"is_enabled": True, "used_credits": 501, "monthly_limit": 2500, "decimal_places": 2, "currency": "EUR"}
+        RATE.update(k=0.5, hours=10)
         c = limits_card(None)
+        assert "runs ~20% over, about $" in c and "Extra credits this month" in c, c
+        RATE.clear()
         assert "Too fast:" in c and tr("lim.budget", pct=pc(40 / 3.5)) in c, c
         STATE["limits"]["seven_day"]["utilization"] = 40
         assert "On track:</strong> about 80%" in limits_card(None)
@@ -2666,6 +2721,22 @@ def selftest():
                 text = re.sub(r"<[^>]+>", " ", page)
                 assert not leftover.search(text) and "{" not in text, (code, leftover.search(text), text[:300])
     assert "&lt;x&gt;" in page_settings({"done": ["test"]}) and 'data-theme="dark"' in page_settings({})
+    # Extra credits: a drop in the counter starts a new month, steps come once per month and only the highest
+    assert extra_months([{"t": i, "extra": v} for i, v in enumerate([None, 1.0, 2.5, 2.5, 0.0, 0.5, 3.0])]) == [[1, 2.5], [4, 3.0]]
+    Lx = {"extra_usage": {"is_enabled": True, "used_credits": 2100, "monthly_limit": 2500, "decimal_places": 2, "currency": "EUR"}}
+    _req.lang = "en"
+    sx, tn = {**DEFAULTS, "extra_steps": "10, 20", "alert_extra": False}, 2e9
+    m, st = alerts(Lx, [], {"extra_used": 2100}, tn, sx)
+    assert [t for t, _, _ in m] == ["extra@20"] and m[0][1] == "Extra credits passed 20 EUR" and alerts(Lx, [], {**st, "extra@20": tn}, tn, sx)[0] == [], m
+    Lx["extra_usage"]["used_credits"] = 100
+    m, st = alerts(Lx, [], {"extra_used": 2100, "extra@20": tn - 20 * 86400}, tn, sx)
+    assert m == [] and "extra@20" not in st and st["extra_used"] == 100, st
+    Lx["extra_usage"]["used_credits"] = 1200
+    assert [t for t, _, _ in alerts(Lx, [], st, tn, sx)[0]] == ["extra@10"] and alerts(Lx, [], st, tn, {**sx, "extra_steps": ""})[0] == []
+    assert clean({"extra_steps": "10, 20.5"}, DEFAULTS)["extra_steps"] == "10, 20.5" and clean({"extra_steps": "ten"}, DEFAULTS)["extra_steps"] == ""
+    RATE["k"] = 0.5
+    assert overrun_usd(120) == 40 and overrun_usd(90) is None and overrun_usd(None) is None
+    RATE.clear()
     # Turns and the chat/spike watch
     assert split_turns([(5, 1.0), (12, 2.0), (13, 1.0), (30, 4.0)], [0, 10, 20]) == [(0, 5, 1, 1.0), (10, 13, 2, 3.0), (20, 30, 1, 4.0)]
     _req.lang, T0, ws = "en", 1e6, {**DEFAULTS, "chat_pct": 3.0, "spike_pct": 3.0}
