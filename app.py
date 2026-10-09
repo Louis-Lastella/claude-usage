@@ -10,7 +10,7 @@ moment: tools, skills, plugins, system prompt parts, thinking, cache rebuilds af
   python3 app.py --ntfy-test              send a test alert
   <hermes-venv>/python app.py --snapshot  measure system prompt parts and tool schemas (the server does this daily)
 """
-import bisect, glob, gzip, html, json, math, os, random, re, secrets, sqlite3, statistics, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
+import bisect, glob, gzip, html, json, math, os, random, re, secrets, shutil, sqlite3, statistics, subprocess, sys, tempfile, threading, time, traceback, urllib.error, urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -102,6 +102,7 @@ DEFAULTS = {
     "cost_unit": "money", "source": "",
     "alert_five": True, "five_min": 30, "alert_week": True, "alert_extra": True, "alert_free": True, "alert_steps": True,
     "alert_digest": True, "alert_chat": True, "chat_pct": 0.5, "alert_spike": True, "spike_pct": 3.0, "extra_steps": "",
+    "guard": False, "guard_jobs": [],
     "quiet": False, "quiet_from": "22:00", "quiet_to": "07:00",
     "push": "own" if _TOPIC else "off", "ntfy_server": _SRV, "ntfy_topic": _TOPIC, "ntfy_token": "", "url": PUBLIC_URL,
 }
@@ -159,6 +160,9 @@ def clean(form, cur):
             s[k] = min(max(x, RANGES[k][0]), RANGES[k][1]) if x is not None and math.isfinite(x) else s[k]
         elif k == "source":
             s[k] = v if v in ("", *profiles()) else s[k]
+        elif k == "guard_jobs":
+            ids = [j["id"] for j in cron_list()]
+            s[k] = [j for j in ids if "gj_" + j in form] if ids else s[k]   # unreadable jobs.json: keep the marks
         elif k == "ntfy_token":
             s[k] = "" if "token_clear" in form else v or s[k]   # empty field = keep the saved token
         elif k in form and re.fullmatch(FORMATS[k], v):
@@ -1284,6 +1288,7 @@ def background():
         ensure_snap()
         refresh_limits(540)
         check_alerts()
+        guard()
         refresh_status()
         watch_config()
         if SET["currency"] == "EUR":
@@ -1747,7 +1752,7 @@ def page_overview(p):
     logged = tr("ov.logged", p=pc(d["logged"] / (d["n_steps"] or 1) * 100))
     push = "" if ntfy_target() else f'<p class="hint pushoff">{tr("ov.push", url="/settings#push")}</p>'
     split = limit_split(limit_history(), d30["hours"], cc_calls(w["since"]), w["since"]) if w["week"] else None
-    body = f"""{limits_card(w["total"] if w["week"] else None, split)}{push}
+    body = f"""{limits_card(w["total"] if w["week"] else None, split)}{guard_note()}{push}
 <div class="kpis">{kpi_html}</div>
 <div class="grid g2">
 <section class="card"><h2>{tr("ov.eats")}</h2>
@@ -2038,6 +2043,86 @@ def page_details(p):
     return layout(tr("nav.details") + " · Usagecast", "/details", p, tr("nav.details"), tr("sub.details", src=source_name(), period=period_text(d)), body)
 
 
+def cron_list():
+    """Recurring cron jobs of the analysed Hermes that are not finished (dicts from cron/jobs.json); one-shot jobs are
+    left out, they end on their own."""
+    try:
+        jobs = json.loads((source_home() / "cron" / "jobs.json").read_text())
+        jobs = jobs.get("jobs", []) if isinstance(jobs, dict) else jobs
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [j for j in jobs if isinstance(j, dict) and isinstance(j.get("id"), str) and j.get("state") != "completed"
+            and (j.get("repeat") or {}).get("times") is None]
+
+
+def cron_costs(d):
+    """{job name: [runs, $]} of the cron sessions in an analysis, and the days it covers."""
+    g = defaultdict(lambda: [0, 0.0])
+    for x in d["sess"].values():
+        if x["origin"].startswith("cron:"):
+            a = g[x["origin"][5:]]
+            a[0] += 1; a[1] += x["cost"]
+    return g, max((min(time.time(), d["until"]) - d["since"]) / 86400, 1 / 24)
+
+
+def guard_state():
+    try:
+        return json.loads((DATA / "guard.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def guard_plan(L, now, jobs, state, s=None):
+    """Budget guard: (pause, resume) job ids. The marked jobs pause while the week forecast is above 100 % (from the
+    second day of the week), the week is at 90 % or the 5-hour window at 85 %. Once none of that holds, or the guard is
+    off, or a job is no longer marked, the jobs the guard paused itself come back. jobs: {id: state from jobs.json};
+    a job the user paused is never "scheduled", so the guard never takes it over."""
+    s = s or SET
+    if not L:
+        return [], []   # limits unknown: change nothing
+    w = {k: (u, frac) for k, u, frac, _, _ in windows(L, now)}
+    u, frac = w.get("seven_day", (0.0, None))
+    tight = s["guard"] and (u >= 90 or w.get("five_hour", (0.0,))[0] >= 85
+                            or bool(frac and frac >= 1 / 7 and (week_forecast(u, frac) or 0) > 100))
+    mine = [j for j in state.get("paused", []) if jobs.get(j) == "paused"]
+    pause = [j for j in s["guard_jobs"] if jobs.get(j) == "scheduled"] if tight else []
+    return pause, [j for j in mine if not tight or j not in s["guard_jobs"]]
+
+
+def guard():
+    """Budget guard step of the 10-minute loop: pauses or resumes the marked jobs through the hermes CLI."""
+    jobs, state = {j["id"]: j for j in cron_list()}, guard_state()
+    pause, resume = guard_plan(STATE["limits"], time.time(), {k: j.get("state") for k, j in jobs.items()}, state)
+    held = {j for j in state.get("paused", []) if jobs.get(j, {}).get("state") == "paused"}
+    if not pause and not resume and held == set(state.get("paused", [])):
+        return
+    exe = shutil.which("hermes") or str(HERMES / "hermes-agent" / "venv" / "bin" / "hermes")
+    prof = ["-p", SET["source"]] if source_home() != HERMES else []
+    done = {"pause": [], "resume": []}
+    for act, ids in (("pause", pause), ("resume", resume)):
+        for j in ids:
+            try:
+                r = subprocess.run([exe, *prof, "cron", act, j], capture_output=True, text=True, timeout=120)
+                if r.returncode == 0:
+                    done[act].append(j)
+                else:
+                    print("guard:", act, j, r.stderr.strip()[-300:], flush=True)
+            except (OSError, subprocess.TimeoutExpired) as err:
+                print("guard:", act, j, err, flush=True)
+    DATA.mkdir(parents=True, exist_ok=True)
+    (DATA / "guard.json").write_text(json.dumps({"paused": sorted((held - set(done["resume"])) | set(done["pause"]))}))
+    for act in ("pause", "resume"):
+        if done[act]:
+            notify(tr("alert.guard"), tr("alert.guard." + act, names=", ".join(jobs[j].get("name") or j for j in done[act])), 2)
+
+
+def guard_note():
+    """Overview line while the guard holds jobs back."""
+    jobs = {j["id"]: j for j in cron_list()}
+    held = [jobs[j].get("name") or j for j in guard_state().get("paused", []) if jobs.get(j, {}).get("state") == "paused"]
+    return f'<p class="hint">{tr("ov.guard", names=e(", ".join(held)))}</p>' if held else ""
+
+
 def cron_jobs(d, p):
     try:
         jobs = json.loads((source_home() / "cron" / "jobs.json").read_text())
@@ -2045,12 +2130,7 @@ def cron_jobs(d, p):
         sched = {j.get("name"): j.get("schedule_display") or (j.get("schedule") or {}).get("display") or "" for j in jobs}
     except (OSError, ValueError, AttributeError):
         sched = {}
-    days = max((min(time.time(), d["until"]) - d["since"]) / 86400, 1 / 24)
-    g = defaultdict(lambda: [0, 0.0])
-    for x in d["sess"].values():
-        if x["origin"].startswith("cron:"):
-            a = g[x["origin"][5:]]
-            a[0] += 1; a[1] += x["cost"]
+    g, days = cron_costs(d)
     rows = sorted(g.items(), key=lambda kv: -kv[1][1])
     s = sum(c for _, (_, c) in rows)
     hint = tr("cron.hint", n=len(rows), cost=money(s), p=pct(s, d["total"]), week=money(s / days * 7))
@@ -2219,6 +2299,13 @@ def page_settings(q):
                        f' inputmode="decimal" aria-label="{T(k)}"><span class="why">{T("pct")}</span>')
     nok = "" if RATE.get("k") else " " + T("a.nok")
     acur = ((STATE["limits"] or {}).get("extra_usage") or {}).get("currency") or ""
+    jl, (gc, gdays), held = cron_list(), cron_costs(data_for("30")), guard_state().get("paused", [])
+    rows = "".join(f'<div class="job"><input type="checkbox" id="gj_{e(j["id"])}" name="gj_{e(j["id"])}"{" checked" if j["id"] in s["guard_jobs"] else ""}>'
+                   f'<label for="gj_{e(j["id"])}">{e(j.get("name") or j["id"])}</label><span class="why">'
+                   f'{tr("set.guard.week", cost=money(gc[j.get("name")][1] / gdays * 7)) if j.get("name") in gc else "–"}'
+                   f'{" · " + T("guard.held") if j["id"] in held and j.get("state") == "paused" else ""}</span></div>' for j in jl)
+    guard_ = field("guard", T("guard.on"), check("guard"), T("guard.on.why")) + (
+        field("guard_jobs", T("guard.jobs"), "", T("guard.jobs.why")) + f'<div class="jobs">{rows}</div>' if jl else f'<p class="hint">{T("guard.none")}</p>')
     ps, main = profiles(), tr("set.src.main", path=e(str(HERMES)))
     source = (field("source", T("src.label"), select("source", [("", main), *((x, e(x)) for x in ps)],
                                                      s["source"] if s["source"] in ps else ""), T("src.why")) if ps
@@ -2267,7 +2354,7 @@ def page_settings(q):
                   f'<button class="btn" name="action" value="useurl">{T("useurl")}</button>', T("url.why"))
     body = (f'{top}<form method="post" action="/settings" class="set">'
             '<button class="sr" name="action" value="save" tabindex="-1" aria-hidden="true"></button>'  # Enter in a field = save
-            + card("look", T("look"), look) + card("limits", T("limits"), limits) + card("alerts", T("alerts"), alerts_, T("alerts.hint"))
+            + card("look", T("look"), look) + card("limits", T("limits"), limits) + card("alerts", T("alerts"), alerts_, T("alerts.hint")) + card("guard", T("guard"), guard_, T("guard.hint"))
             + card("push", T("push"), push, T("push.hint")) + card("source", T("src"), source)
             + f'<div class="save"><button class="btn primary" name="action" value="save">{T("save")}</button></div></form>')
     return layout(T("h1") + " · Usagecast", "/settings", s["period"], T("h1"), T("sub"), body, tabs=False)
@@ -2451,8 +2538,9 @@ def demo():
     DATA.mkdir()
     demo_db(now).backup(disk := sqlite3.connect(tmp / "state.db"))
     disk.close()
-    (tmp / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"name": "Daily report", "schedule_display": "0 7 * * *"},
-                                                                 {"name": "Inbox digest", "schedule_display": "every 360m"}]}))
+    (tmp / "cron" / "jobs.json").write_text(json.dumps({"jobs": [
+        {"id": "d1", "name": "Daily report", "schedule_display": "0 7 * * *", "state": "scheduled", "repeat": {"times": None}},
+        {"id": "d2", "name": "Inbox digest", "schedule_display": "every 360m", "state": "scheduled", "repeat": {"times": None}}]}))
     (DATA / "snapshot.json").write_text(json.dumps({"prompt": {}, "at": now, "tools": {
         "terminal": 1100, "read_file": 480, "search_files": 510, "patch": 560, "web_search": 230, "web_extract": 320, "browser_exec": 1060,
         "session_search": 2000, "skill_view": 270, "memory": 900, "todo": 390, "cronjob": 2800, "delegate_task": 1650}}))
@@ -2468,7 +2556,7 @@ def demo():
     STATE.update(limits={"five_hour": {"utilization": 34.0, "resets_at": iso(five)}, "seven_day": {"utilization": 62.0, "resets_at": iso(reset)},
                          "extra_usage": {"is_enabled": True, "used_credits": 501, "monthly_limit": 2500, "decimal_places": 2, "currency": "USD"}},
                  at=1e12, ok=now)   # at far ahead: refresh_limits() never fetches
-    SET.clear(); SET.update(DEFAULTS, push="off", ntfy_topic="", url=""); FX.clear()
+    SET.clear(); SET.update(DEFAULTS, push="off", ntfy_topic="", url="", guard=True, guard_jobs=["d2"]); FX.clear()
     print(f"usagecast demo on http://127.0.0.1:{PORT} (data in {tmp})", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
@@ -2710,6 +2798,12 @@ def selftest():
         assert abs(sum(day_costs().values()) - real) < 1e-9, (day_costs(), real)   # the calendar loses nothing
         cal = calendar({(datetime.now().date() - timedelta(days=1)).isoformat(): 2.0})
         assert cal.count('class="h4" title') == 1 and cal.count("<i ") >= 365 + 5, cal[:200]
+        (HERMES / "cron").mkdir()
+        (HERMES / "cron" / "jobs.json").write_text(json.dumps({"jobs": [
+            {"id": "j1", "name": "Daily report", "state": "paused", "repeat": {"times": None}},
+            {"id": "j2", "name": "Once", "state": "scheduled", "repeat": {"times": 1}}]}))
+        (DATA / "guard.json").write_text(json.dumps({"paused": ["j1"]}))
+        assert [j["id"] for j in cron_list()] == ["j1"] and "Daily report" in guard_note() and clean({"gj_j1": "on", "gj_j2": "on"}, SET)["guard_jobs"] == ["j1"]
         leftover = re.compile(r"\b(?:th|set|cal|ovl|ev|brk|ov|lim|det|ses|hist|heat|nav|kpi|seg|src|proj|cron|period|since|fmt|num|tip|comp|label|alert|until|sub)\.[a-z_]")
         for code in LOC:
             _req.lang, _req.url = code, "/?p=7"
@@ -2737,6 +2831,19 @@ def selftest():
     RATE["k"] = 0.5
     assert overrun_usd(120) == 40 and overrun_usd(90) is None and overrun_usd(None) is None
     RATE.clear()
+    # Budget guard: marked active jobs pause when the week gets tight, only its own come back, unknown limits change nothing
+    tg = 2e9
+    Lg = lambda wk, five, frac: {"seven_day": {"utilization": wk, "resets_at": iso(tg + (1 - frac) * 7 * 86400)},
+                                 "five_hour": {"utilization": five, "resets_at": iso(tg + 3600)}}
+    gs, jobs = {**DEFAULTS, "guard": True, "guard_jobs": ["a", "b", "u"]}, {"a": "scheduled", "b": "scheduled", "u": "paused", "c": "scheduled"}
+    assert guard_plan(Lg(50, 10, 0.5), tg, jobs, {}, gs) == ([], []) and guard_plan(Lg(60, 10, 0.5), tg, jobs, {}, gs) == (["a", "b"], [])
+    assert guard_plan(Lg(12, 10, 0.1), tg, jobs, {}, gs) == ([], []) and guard_plan(Lg(40, 85, 0.5), tg, jobs, {}, gs)[0] == ["a", "b"]
+    assert guard_plan(Lg(90, 0, 0.95), tg, jobs, {}, gs)[0] == ["a", "b"] and guard_plan(Lg(60, 10, 0.5), tg, jobs, {}, {**gs, "guard": False}) == ([], [])
+    held = {"a": "paused", "b": "paused", "u": "paused", "c": "scheduled"}
+    assert guard_plan(Lg(50, 10, 0.5), tg, held, {"paused": ["a", "b"]}, gs) == ([], ["a", "b"])   # room again, u stays the user's
+    assert guard_plan(Lg(60, 10, 0.5), tg, held, {"paused": ["a", "b"]}, {**gs, "guard_jobs": ["a"]}) == ([], ["b"])
+    assert guard_plan(Lg(60, 10, 0.5), tg, held, {"paused": ["a"]}, {**gs, "guard": False}) == ([], ["a"])
+    assert guard_plan(None, tg, held, {"paused": ["a"]}, gs) == ([], []) and guard_plan(Lg(50, 10, 0.5), tg, jobs, {"paused": ["a"]}, gs) == ([], [])
     # Turns and the chat/spike watch
     assert split_turns([(5, 1.0), (12, 2.0), (13, 1.0), (30, 4.0)], [0, 10, 20]) == [(0, 5, 1, 1.0), (10, 13, 2, 3.0), (20, 30, 1, 4.0)]
     _req.lang, T0, ws = "en", 1e6, {**DEFAULTS, "chat_pct": 3.0, "spike_pct": 3.0}

@@ -111,6 +111,11 @@ Every 10 minutes the server checks the limits and sends at most one push message
 
 The last two need a few days of limit readings first (they work in % of the week). Tapping them opens the session.
 
+**Budget guard** (off by default): on `/settings` you mark recurring cron jobs that may wait. While the week gets tight
+(forecast above 100 % from the second day, the week at 90 % or the 5-hour window at 85 %) Usagecast pauses them with
+`hermes cron pause` and resumes them once there is room again, each time with a quiet push. Jobs you paused yourself
+are never touched; the overview says which jobs are held back.
+
 On Sunday evening a quiet digest follows: where the week stands, the biggest item and the change against last week.
 
 **Setup in a minute:** On `/settings`, "Set up push" creates your own random topic on [ntfy.sh](https://ntfy.sh). On

@@ -115,6 +115,11 @@ Alle 10 Minuten prüft der Server die Limits und schickt höchstens einmal pro F
 
 Die letzten beiden brauchen erst ein paar Tage Limit-Messungen (sie rechnen in % der Woche). Antippen öffnet die Session.
 
+**Budget-Wächter** (standardmäßig aus): Auf `/settings` markierst du wiederkehrende Cron-Jobs, die warten dürfen. Wird
+die Woche knapp (Prognose über 100 % ab dem zweiten Tag, Woche bei 90 % oder 5-Stunden-Fenster bei 85 %), pausiert
+Usagecast sie mit `hermes cron pause` und setzt sie fort, sobald wieder Luft ist, jeweils mit einem leisen Push. Jobs,
+die du selbst pausiert hast, bleiben unangetastet; die Übersicht zeigt, welche Jobs gerade warten.
+
 Am Sonntagabend kommt leise ein Wochenrückblick: Stand der Woche, größter Posten und Vergleich zur Vorwoche.
 
 **Einrichtung in einer Minute:** Auf `/settings` erzeugt „Push einrichten“ ein eigenes, zufälliges Topic auf

@@ -219,6 +219,7 @@ aside nav a.end{margin-top:auto}
 .field .why{max-width:62ch}
 .ctl{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}
 .ctl .why{margin:0}
+.jobs{display:grid;gap:10px;padding:0 0 14px}.job{display:flex;align-items:center;gap:10px}.job label{font-weight:500}.job .why{margin:0 0 0 auto;text-align:right}
 .set input:not([type=checkbox]):not([type=radio]),.set select{font:inherit;font-size:14px;color:var(--ink);background:var(--bg);border:0;box-shadow:0 0 0 1px var(--line2);border-radius:8px;padding:7px 11px;min-height:36px;transition:box-shadow .15s}
 .set input:not([type=checkbox]):not([type=radio]):hover,.set select:hover{box-shadow:0 0 0 1px var(--soft)}
 .set input:focus-visible,.set select:focus-visible{outline:2px solid var(--acc-ink);outline-offset:1px}
