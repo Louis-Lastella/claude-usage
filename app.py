@@ -2339,6 +2339,15 @@ def selftest():
         db.backup(disk := sqlite3.connect(Path(tmp) / "state.db"))
         disk.close()
         STATE["at"] = time.time()  # no limit fetch during the test
+        # Limits card: pace verdict and daily budget with half the week gone
+        old, nw, _req.lang = STATE["limits"], time.time(), "en"
+        STATE["limits"] = {"seven_day": {"utilization": 60, "resets_at": iso(nw + 3.5 * 86400)},
+                           "five_hour": {"utilization": 30, "resets_at": iso(nw + 3600)}}
+        c = limits_card(None)
+        assert "Too fast:" in c and tr("lim.budget", pct=pc(40 / 3.5)) in c, c
+        STATE["limits"]["seven_day"]["utilization"] = 40
+        assert "On track:</strong> about 80%" in limits_card(None)
+        STATE["limits"] = old
         cl = Path(tmp) / "claude" / "projects" / "-x"
         cl.mkdir(parents=True)
         msg = {"type": "assistant", "requestId": "r", "timestamp": "2026-10-08T10:00:00Z", "message": {"id": "m", "model": "claude-opus-5-5",
