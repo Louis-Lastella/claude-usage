@@ -1,7 +1,9 @@
 // Usagecast widget for Scriptable (iOS): weekly limit and 5-hour window on the home screen.
 // Setup: copy this file into Scriptable, add a small Scriptable widget, pick this script and put your
 // dashboard address into "Parameter", for example https://my-server.example:8443
-const base = (args.widgetParameter || "http://127.0.0.1:7681").replace(/\/$/, "");
+// Or write it into ADDRESS below; that one is also used when you run the script inside the app.
+const ADDRESS = "";
+const base = (args.widgetParameter || ADDRESS).trim().replace(/\/+$/, "");
 const col = (light, dark) => Color.dynamic(new Color(light), new Color(dark));
 const C = {
   bg: col("#ffffff", "#1c1b19"), ink: col("#1c1a18", "#f3f1ee"), mute: col("#67615b", "#a8a29b"),
@@ -30,7 +32,12 @@ w.backgroundColor = C.bg;
 w.setPadding(14, 14, 14, 14);
 w.url = base;
 try {
-  const s = await new Request(base + "/api/summary").loadJSON();
+  if (!base) throw new Error("No address. Put the dashboard URL into the widget's Parameter.");
+  const req = new Request(base + "/api/summary");
+  const raw = await req.loadString();
+  const code = req.response && req.response.statusCode;
+  if (code !== 200) throw new Error("HTTP " + code + ": not the dashboard. Check address and port.");
+  const s = JSON.parse(raw);
   const week = s.limits.seven_day, five = s.limits.five_hour;
   text(w, "Weekly limit", C.mute, Font.mediumSystemFont(11));
   text(w, Math.round(week.used) + "%", C.ink, Font.semiboldSystemFont(30));
@@ -46,7 +53,9 @@ try {
   }
 } catch (e) {
   text(w, "Usagecast", C.ink, Font.semiboldSystemFont(13));
-  text(w, "Not reachable: " + base, C.mute, Font.systemFont(10));
+  text(w, "Not reachable: " + (base || "-"), C.mute, Font.systemFont(10)).lineLimit = 2;
+  w.addSpacer(4);
+  text(w, String(e.message || e), C.ink, Font.systemFont(10)).lineLimit = 4;   // the real reason
 }
 w.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000);
 if (config.runsInWidget) Script.setWidget(w);
