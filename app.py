@@ -450,7 +450,7 @@ def log_index():
 def origin(src, title):
     """Language-neutral origin id: the source, or cron:<job name> for cron sessions."""
     if src == "cron":
-        return "cron:" + ((title or "").split(" · ")[0] or "?")
+        return "cron:" + (title or "").split(" · ")[0]
     return src or "?"
 
 
@@ -725,7 +725,7 @@ def seg_label(name):
 
 def origin_label(k):
     if k.startswith("cron:"):
-        return tr("origin.cron", name=k[5:])
+        return tr("origin.cron", name=k[5:] or tr("untitled"))
     return tr("src." + k) if "src." + k in LOC["en"] else (k or "?").capitalize()
 
 
@@ -787,7 +787,7 @@ def tips(d, snap):
         out.append((tl[0][1] / 3, tr("tip.tool", name=name), hint + " " + tr("tip.share", p=p(tl[0][1]))))
     for org, v in sorted(d["where"].items(), key=lambda x: -x[1]):
         if org.startswith("cron:") and v > 0.05 * tot:
-            out.append((v / 2, tr("tip.cron", name=org[5:]), tr("tip.cron.text", p=p(v))))
+            out.append((v / 2, tr("tip.cron", name=org[5:] or tr("untitled")), tr("tip.cron.text", p=p(v))))
     for k, v in d["comp"].items():
         if k.startswith("inj:") and v > 0.03 * tot:
             out.append((v, tr("tip.inj", name=seg_label(k[4:])), tr("tip.inj.text", p=p(v))))
@@ -1190,6 +1190,10 @@ def group(k):
 def table(head, rows, cls=(), tcls=""):
     """head: locale keys. cls: CSS classes per column, l = left aligned, o = hidden on phones."""
     c = lambda i: f' class="{cls[i]}"' if i < len(cls) and cls[i] else ""
+    if SET["cost_unit"] == "week" and RATE.get("k"):   # ponytail: text replace on money()'s output, a short money() if this breaks
+        head = ["th.cost.wk" if x == "th.cost" else x for x in head]
+        unit, short = tr("fmt.week", v=""), tr("fmt.pct", v="")
+        rows = [[str(x).replace(unit, short) for x in r] for r in rows]
     h = "".join(f"<th{c(i)}>{e(tr(x))}</th>" for i, x in enumerate(head))
     b = "".join("<tr>" + "".join(f"<td{c(i)}>{x}</td>" for i, x in enumerate(r)) + "</tr>" for r in rows) \
         or f'<tr><td colspan="{len(head)}">{tr("nodata")}</td></tr>'
@@ -1204,7 +1208,7 @@ def bars(items, tot, ttl, explain=True, n=12, p=None, soft=False, name_of=None):
     out = ""
     for k, v in items[:n]:
         name, why = name_of(k)
-        head = (f'<div class="row"><span>{brk(name)}</span><span class="v">{pct(v, tot)} · {money(v)}</span></div>'
+        head = (f'<div class="row"><span>{brk(name)}</span><span class="v">{money(v) if SET["cost_unit"] == "week" and RATE.get("k") else f"{pct(v, tot)} · {money(v)}"}</span></div>'
                 f'<div class="t{" soft" if soft else ""}"><i style="width:{v / top * 100:.1f}%"></i></div>')
         if explain and why and (k in FIXED or not k.startswith("tool:")):   # the sentence for tools would repeat on every tool
             out += f'<details class="bar"><summary>{head}</summary><div class="why">{e(why)}</div></details>'
@@ -1501,8 +1505,9 @@ def span_sum(d, a, b):
 
 
 def signed(cur, prev):
-    """+18 % / −7 %: change against an earlier value."""
-    return ("+" if cur >= prev else "−") + pc(abs(cur / prev - 1) * 100)
+    """+18 % / −7 % / ±0 %: change against an earlier value."""
+    d = abs(cur / prev - 1) * 100
+    return ("±" if d < 0.5 else "+" if cur >= prev else "−") + pc(d)
 
 
 def week_delta(d30, cur, since, now):
@@ -1856,7 +1861,7 @@ def cron_jobs(d, p):
     hint = tr("cron.hint", n=len(rows), cost=money(s), p=pct(s, d["total"]), week=money(s / days * 7))
     return (f'<p class="hint">{hint}</p>'
             + table(["th.cronjob", "th.schedule", "th.runs", "th.per_run", "th.cost", "th.per_week"],
-                    [(f'<a href="{link("/sessions", p=p, src="cron", q=n)}">{e(n)}</a>',
+                    [(f'<a href="{link("/sessions", p=p, src="cron", q=n)}">{e(n)}</a>' if n else tr("untitled"),
                       f"<code>{e(sched[n])}</code>" if sched.get(n) else "–", cnt(r), money(c / r), money(c), money(c / days * 7))
                      for n, (r, c) in rows], ("", "l o", "", "o", "", "")))
 
@@ -1969,7 +1974,9 @@ def check(k):
 def field(k, name, ctl, why=""):
     """One settings row: name and explanation left, control right. k: id of the control."""
     why = '<div class="why">' + why + "</div>" if why else ""   # a div: the push steps hold a list
-    return f'<div class="field"><div><label for="{k}" id="{k}-l">{name}</label>{why}</div><div class="ctl">{ctl}</div></div>'
+    lab = (f'<label for="{k}" id="{k}-l">{name}</label>' if re.search(rf'<(?:input|select|button)\b[^>]*\bid="{k}"', ctl)
+           else f'<span class="fname" id="{k}-l">{name}</span>')
+    return f'<div class="field"><div>{lab}{why}</div><div class="ctl">{ctl}</div></div>'
 
 
 def card(k, title, inner, hint=""):
@@ -1982,10 +1989,19 @@ def page_settings(q):
     note = ""
     if done == "test" and time.time() - LAST_PUSH.get("at", 0) < 600:
         note = tr("set.test.ok" if LAST_PUSH["ok"] else "set.test.fail", reply=f'<code>{e(LAST_PUSH["reply"])}</code>')
+        fail, code = not LAST_PUSH["ok"] and ntfy_target(), LAST_PUSH["reply"][:3]
+        if fail and code in ("401", "403"):
+            note += " " + T("test.auth")
+        elif fail and not code.isdigit():
+            note += " " + T("test.net")
     elif done in ("save", "setup", "newtopic", "useurl"):
         note = T("done." + done)
     note = f'<p class="note" role="status">{note}</p>' if note else ""
     top, push_note = (note, "") if done == "save" else ("", note)
+    names = {"ntfy_topic": "topic", "ntfy_server": "server.url", "url": "url", "quiet_from": "quiet.from", "quiet_to": "quiet.to"}
+    bad = [T(names[k]) for k in (q.get("bad") or [""])[0].split(",") if k in names]
+    if bad:
+        top = f'<p class="note" role="alert">{tr("set.bad", fields=", ".join(bad))}</p>'
     if FX.get("rate"):
         fx = tr("set.fx", date=when(datetime.fromisoformat(FX["date"]).timestamp(), "day"), rate=nf(FX["rate"], 4))
     else:
@@ -2019,13 +2035,15 @@ def page_settings(q):
         android = f'ntfy://{host}/{s["ntfy_topic"]}' + ("" if s["ntfy_server"].startswith("https:") else "?secure=false")
         steps = "".join(f"<li>{x}</li>" for x in (tr("set.ios.1", url=APP_STORE), T("ios.2"), T("ios.3")))
         ios = f'{T("ios")}<ol class="steps">{steps}</ol>' + (tr("set.ios.own", server=e(s["ntfy_server"])) if own else "")
-        push += (field("ntfy_topic", T("topic"), f'<input id="ntfy_topic" name="ntfy_topic" value="{e(s["ntfy_topic"])}" class="mono"'
+        own = (field("ntfy_topic", T("topic"), f'<input id="ntfy_topic" name="ntfy_topic" value="{e(s["ntfy_topic"])}" class="mono" pattern="[A-Za-z0-9_\\-]+" maxlength="64"'
                        f' spellcheck="false" autocomplete="off" autocapitalize="off"><button type="button" class="btn" data-done="{T("copied")}"'
                        f' onclick="{COPY_JS}">{T("copy")}</button>', T("topic.why"))
                  + field("android", T("subscribe"), f'<a class="btn" id="android" href="{e(android)}">{T("android")}</a>', ios)
-                 + field("test", T("test"), f'<button class="btn" id="test" name="action" value="test">{T("test.btn")}</button>', T("test.why"))
-                 + field("newtopic", T("newtopic"), f'<button class="btn" id="newtopic" name="action" value="newtopic">{T("newtopic.btn")}</button>',
-                         T("newtopic.why")))
+                 + field("newtopic", T("newtopic"), f'<button class="btn" id="newtopic" name="action" value="newtopic"'
+                         f' data-q="{e(T("newtopic.confirm"))}" onclick="return confirm(this.dataset.q)">{T("newtopic.btn")}</button>', T("newtopic.why")))
+        push += f'<details class="adv"><summary>{T("own")}</summary>{own}</details>' if s["push"] == "hermes" else own   # Hermes sends, own topic waits
+    if target:
+        push += field("test", T("test"), f'<button class="btn" id="test" name="action" value="test">{T("test.btn")}</button>', T("test.why"))
     hermes_ok = hermes_ntfy() is not None
     push += field("push", T("via"), opts("push", [(v, T("via." + v)) for v in CHOICES["push"]], () if hermes_ok else ("hermes",)),
                   T("via.why" if hermes_ok else "via.nohermes"))
@@ -2110,6 +2128,7 @@ class Handler(BaseHTTPRequestHandler):
         form = {k: v[-1] for k, v in parse_qs(self.rfile.read(int(n)).decode("utf-8", "replace"), keep_blank_values=True).items()}
         action = form.get("action", "save")
         s = clean(form, SET)
+        bad = [k for k in FORMATS if form.get(k, "").strip().rstrip("/") not in ("", s[k])]   # clean() kept the old value
         if action in ("setup", "newtopic"):
             s["ntfy_topic"] = new_topic()
             s["push"] = "own" if action == "setup" else s["push"]
@@ -2123,7 +2142,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, reply = send_push(tr("alert.test"), tr("alert.test.text"), 3)
             LAST_PUSH.update(at=time.time(), ok=ok, reply=reply)
         self.send_response(303)
-        self.send_header("Location", f"/settings?done={quote(action)}" + ("" if action == "save" else "#push"))
+        self.send_header("Location", f"/settings?done={quote(action)}" + (f"&bad={','.join(bad)}" if bad else "")
+                         + ("" if action == "save" or bad else "#push"))
         self.send_header("Set-Cookie", f"lang={s['lang']}; Path=/; Max-Age=31536000; SameSite=Lax")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -2191,7 +2211,12 @@ def selftest():
     SET.update(currency="USD", numbers="compact"); FX.clear()
     SET["cost_unit"], RATE["k"] = "week", 0.5
     assert (money(4), money(0.1), cash(4), dur(59 * 60), dur(80 * 60)) == ("2.0% of week", "< 0.1% of week", "$4.00", "~59 min", "~1 h 20 min")
+    t = table(["th.cost"], [(money(4),)])
+    assert "<th>% of week</th>" in t and "<td>2.0%</td>" in t and ">2.0% of week</span>" in bars([("x", 4.0)], 8.0, 300, False), t
     SET["cost_unit"] = "money"; RATE.clear()
+    assert (signed(100.3, 100), signed(120, 100), signed(90, 100)) == ("±0%", "+20%", "−10%")
+    assert origin("cron", None) == "cron:" and origin_label("cron:") == "Cron: Untitled" and origin_label("cron:a") == "Cron: a"
+    assert '<span class="fname" id="theme-l">' in field("theme", "T", opts("theme", [("system", "S")])) and '<label for="x"' in field("x", "X", '<input id="x">')
     # Limit split: the growth of each hour goes to whoever ran then, gaps without readings count for nobody
     vals = [10 + i for i in range(7)] + [16 + i for i in range(1, 7)] + [22 + 0.5 * i for i in range(1, 7)]
     hist = [{"t": 7200 + 600 * i, "seven_day": v} for i, v in enumerate(vals)] + [{"t": 7200 + 600 * 18 + 3600, "seven_day": 27}]
@@ -2347,6 +2372,9 @@ def selftest():
                 return err.code
         assert post("http://evil.example") == 403 and SET["theme"] == "system"
         assert post(f"http://127.0.0.1:{srv.server_port}") == 200 and load_settings()["theme"] == "dark"   # 303 to the page
+        r = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{srv.server_port}/settings", b"quiet_from=25:00&action=save",
+                                                          {"Origin": f"http://127.0.0.1:{srv.server_port}"}), timeout=30)
+        assert r.url.endswith("bad=quiet_from") and 'role="alert"' in r.read().decode(), r.url
         srv.shutdown()
         LAST_PUSH.update(at=time.time(), ok=False, reply="<x>")
         assert abs(sum(day_costs().values()) - real) < 1e-9, (day_costs(), real)   # the calendar loses nothing
